@@ -1,0 +1,31 @@
+[project]
+name = "idx-portfolio-pipeline"
+version = "0.1.0"
+description = "ETL pipeline for Indonesian stock portfolio analytics"
+authors = [
+    {name = "Zakihran13",email = "zakisuzaki13@gmail.com"}
+]
+requires-python = ">=3.12, <3.16"
+dependencies = [
+    "numpy (>=1.26.0,<3.0.0)",
+    "pandas (>=2.2.0,<3.0.0)",
+    "loguru (>=0.7.3,<0.8.0)",
+    "httpx (>=0.28.1,<0.29.0)",
+    "playwright (>=1.54.0,<2.0.0)",
+    "sqlalchemy (>=2.0.0,<3.0.0)",
+    "streamlit (>=1.37.0,<2.0.0)",
+    "yfinance (>=0.2.40,<0.3.0)",
+    "openpyxl (>=3.1.5,<4.0.0)",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+package-mode = false
+[dependency-groups]
+dev = [
+    "ipykernel (>=7.3.0,<8.0.0)"
+]
