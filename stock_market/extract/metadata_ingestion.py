@@ -7,6 +7,7 @@ import asyncio
 import aiometer
 import nest_asyncio
 nest_asyncio.apply()
+import numpy as np
 
 
 from data.db.statements import insert_metadata
@@ -25,7 +26,7 @@ def process_ticker(ticker: list[str]):
         tickers = yf.Tickers(flatten_ticker)
         for s, t in tickers.tickers.items():
             metadata_list.append({
-                "Symbol": s,
+                "ticker": s,
                 **t.info
             })
 
@@ -41,20 +42,21 @@ async def exec_metadata():
     all_tickers = pd.read_json(r"C:\Users\zakis\OneDrive\Desktop\indonesia-stock-pipeline\data\indonesian_stock_list.json")
     all_tickers['Kode Jakarta'] = all_tickers['Kode'] + ".JK"
 
-    batches = split_batch(all_tickers["Kode Jakarta"].tolist()[:20], 50)
+    batches = split_batch(all_tickers["Kode Jakarta"].tolist(), 50)
 
     tasks = [asyncio.to_thread(process_ticker, batch) for batch in batches]
     results = await asyncio.gather(*tasks)
     metadata_df = pd.concat(results, ignore_index=True)
+    metadata_df = metadata_df.replace({np.nan: None})
 
     # store data
     engine = init_async_db()
     try:
         async with engine.begin() as conn:
-            for _, row in metadata_df.iterrows():
-                await insert_metadata(conn, row.to_dict()) 
+            await insert_metadata(conn, metadata_df) 
     finally:
         await engine.dispose()
+
 
 
 
