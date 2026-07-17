@@ -1,75 +1,206 @@
-from __future__ import annotations
+from utils.helper import snake_case_columns
+import data.db.entities as e
+from decimal import Decimal, InvalidOperation
+import math
 
-import json
-import re
-from datetime import datetime
-from typing import Any, Hashable, Mapping
-
-import pandas as pd
-from data.db import entities as e
-
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.sql.sqltypes import BigInteger, Integer, Numeric, String, Text
+import pandas as pd
 
 
-_SPECIAL_KEY_MAP = {
-    "Symbol": "symbol",
-    "symbol": "symbol",
-    "52WeekChange": "fifty_two_week_change",
-    "SandP52WeekChange": "s_and_p_52_week_change",
-}
+def metadata_separation(df: pd.DataFrame):
+    metadata_df = (
+        df.reindex(columns=e.StockMetadata.__table__.columns.keys())
+        .copy()
+        .drop(columns=["stock_id"], errors="ignore")
+    )
+    analytics_df = df.reindex(columns=e.AnalyticData.__table__.columns.keys()).copy()
+    fundamental_df = df.reindex(
+        columns=e.FundamentalData.__table__.columns.keys()
+    ).copy()
+    dynamic_df = df.reindex(columns=e.DynamicData.__table__.columns.keys()).copy()
+
+    return metadata_df, analytics_df, fundamental_df, dynamic_df
 
 
-def _camel_to_snake(name: str) -> str:
-    step1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", step1).lower()
+def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
+    """Convert a DataFrame into DB-safe records.
+
+    Pandas uses NaN/NaT for missing values, but the database layer expects None
+    so those values become SQL NULL.
+
+    Some Yahoo payload fields come as numeric values for string DB columns
+    (e.g. fax/phone can be 0). Coerce those to strings before binding.
+
+    Some numeric fields can exceed DB precision (NUMERIC(p,s)); these are
+    converted to None to avoid asyncpg numeric overflow errors.
+    """
+    sanitized = df.astype(object).where(pd.notna(df), None)
+    records = sanitized.to_dict(orient="records")
+
+    column_by_name = {column.name: column for column in table.__table__.columns}
+
+    string_columns = {
+        column.name
+        for column in table.__table__.columns
+        if isinstance(column.type, (String, Text))
+    }
+
+    numeric_columns = {
+        column.name: column.type
+        for column in table.__table__.columns
+        if isinstance(column.type, Numeric)
+    }
+
+    integer_columns = {
+        column.name: column.type
+        for column in table.__table__.columns
+        if isinstance(column.type, (Integer, BigInteger))
+    }
+
+    def sanitize_numeric(value, numeric_type: Numeric):
+        if value is None:
+            return None
+
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+        if not decimal_value.is_finite():
+            return None
+
+        precision = numeric_type.precision
+        scale = numeric_type.scale
+
+        if precision is not None and scale is not None:
+            limit = Decimal(10) ** (precision - scale)
+            if abs(decimal_value) >= limit:
+                return None
+
+        return float(decimal_value)
+
+    def sanitize_integer(value, integer_type):
+        if value is None:
+            return None
+
+        if isinstance(value, bool):
+            return int(value)
+
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+
+        try:
+            int_value = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        if isinstance(integer_type, BigInteger):
+            if int_value < -9223372036854775808 or int_value > 9223372036854775807:
+                return None
+
+        return int_value
+
+    for record in records:
+        for column_name in string_columns:
+            value = record.get(column_name)
+            if value is not None and not isinstance(value, str):
+                record[column_name] = str(value)
+
+        for column_name, numeric_type in numeric_columns.items():
+            if column_name in record:
+                record[column_name] = sanitize_numeric(record.get(column_name), numeric_type)
+
+        for column_name, integer_type in integer_columns.items():
+            if column_name in record:
+                record[column_name] = sanitize_integer(record.get(column_name), integer_type)
+
+    return records
 
 
-def _normalize_value(value: Any) -> Any:
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str)
-    if pd.isna(value):
-        return None
-    return value
-
-
-def _normalize_metadata_input(data: Mapping[Hashable, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    valid_columns = set(e.TickerMetadata.__mapper__.column_attrs.keys())
-
-    for key, value in data.items():
-        key_name = str(key)
-        mapped_key = _SPECIAL_KEY_MAP.get(key_name)
-        if mapped_key is None:
-            mapped_key = _camel_to_snake(key_name)
-
-        if mapped_key in valid_columns:
-            normalized[mapped_key] = _normalize_value(value)
-
-    now = datetime.utcnow()
-    normalized.setdefault("created_at", now)
-    normalized["updated_at"] = now
-
-    return normalized
-
-
-async def insert_metadata(conn: AsyncConnection, data: Mapping[Hashable, Any]) -> None:
-    payload = _normalize_metadata_input(data)
-    if not payload.get("symbol"):
+async def upsert_table(
+    conn: AsyncConnection,
+    table,
+    df: pd.DataFrame,
+    on_conflict_columns: list[str] | None = None,
+):
+    """Upserts data into the specified table."""
+    if df.empty:
         return
 
-    stmt = insert(e.TickerMetadata).values(**payload)
-
-    update_map = {
-        column.name: getattr(stmt.excluded, column.name)
-        for column in e.TickerMetadata.__table__.columns
-        if column.name not in {"symbol", "created_at"}
-    }
-    update_map["updated_at"] = datetime.utcnow()
-
-    upsert_stmt = stmt.on_conflict_do_update(
-        index_elements=[e.TickerMetadata.__table__.c.symbol],
-        set_=update_map,
+    conflict_columns = on_conflict_columns or list(
+        table.__table__.primary_key.columns.keys()
     )
-    await conn.execute(upsert_stmt)
+    primary_key_columns = set(table.__table__.primary_key.columns.keys())
+    stmt = insert(table).values(dataframe_to_records(table, df))
 
+    stmt = stmt.on_conflict_do_update(
+        index_elements=conflict_columns,
+        set_={
+            c.name: getattr(stmt.excluded, c.name)
+            for c in stmt.excluded
+            if c.name not in conflict_columns and c.name not in primary_key_columns
+        },
+    )
+
+    await conn.execute(stmt)
+
+
+async def fetch_stock_ids(conn: AsyncConnection, tickers: list[str]) -> dict[str, int]:
+    if not tickers:
+        return {}
+
+    result = await conn.execute(
+        select(e.StockMetadata.ticker, e.StockMetadata.stock_id).where(
+            e.StockMetadata.ticker.in_(tickers)
+        )
+    )
+    return {ticker: stock_id for ticker, stock_id in result.all()}
+
+
+def attach_stock_ids(
+    child_df: pd.DataFrame, metadata_df: pd.DataFrame, stock_ids: dict[str, int]
+) -> pd.DataFrame:
+    child_df = child_df.copy()
+    child_df["stock_id"] = metadata_df["ticker"].map(stock_ids)
+    child_df = child_df.dropna(subset=["stock_id"])
+
+    if not child_df.empty:
+        child_df["stock_id"] = child_df["stock_id"].astype(int)
+
+    return child_df
+
+
+async def insert_metadata(conn, raw_df: pd.DataFrame):
+    """Inserts metadata into the database."""
+
+    # rename mapping
+    renamed_df = snake_case_columns(raw_df)
+
+    # separate data: metadata, analyctics, fundamental, dynamic
+    metadata_df, analytics_df, fundamental_df, dynamic_df = metadata_separation(
+        renamed_df
+    )
+    metadata_df[["created_at", "updated_at"]] = pd.Timestamp.now()
+    analytics_df[["retrieve_at"]] = pd.Timestamp.now()
+    fundamental_df[["retrieve_at"]] = pd.Timestamp.now()
+    dynamic_df[["retrieve_at"]] = pd.Timestamp.now()
+
+    # insertion
+    await upsert_table(
+        conn, e.StockMetadata, metadata_df, on_conflict_columns=["ticker"]
+    )
+
+    stock_ids = await fetch_stock_ids(
+        conn, metadata_df["ticker"].dropna().astype(str).tolist()
+    )
+
+    analytics_df = attach_stock_ids(analytics_df, metadata_df, stock_ids)
+    fundamental_df = attach_stock_ids(fundamental_df, metadata_df, stock_ids)
+    dynamic_df = attach_stock_ids(dynamic_df, metadata_df, stock_ids)
+
+    await upsert_table(conn, e.AnalyticData, analytics_df)
+    await upsert_table(conn, e.FundamentalData, fundamental_df)
+    await upsert_table(conn, e.DynamicData, dynamic_df)
