@@ -111,11 +111,15 @@ def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
 
         for column_name, numeric_type in numeric_columns.items():
             if column_name in record:
-                record[column_name] = sanitize_numeric(record.get(column_name), numeric_type)
+                record[column_name] = sanitize_numeric(
+                    record.get(column_name), numeric_type
+                )
 
         for column_name, integer_type in integer_columns.items():
             if column_name in record:
-                record[column_name] = sanitize_integer(record.get(column_name), integer_type)
+                record[column_name] = sanitize_integer(
+                    record.get(column_name), integer_type
+                )
 
     return records
 
@@ -148,15 +152,17 @@ async def upsert_table(
     await conn.execute(stmt)
 
 
-async def fetch_stock_ids(conn: AsyncConnection, tickers: list[str]) -> dict[str, int]:
+async def fetch_stock_ids(
+    conn: AsyncConnection, tickers: list[str] | None = None
+) -> dict[str, int]:
     if not tickers:
-        return {}
-
-    result = await conn.execute(
-        select(e.StockMetadata.ticker, e.StockMetadata.stock_id).where(
+        stmt = select(e.StockMetadata.ticker, e.StockMetadata.stock_id)
+    else:
+        stmt = select(e.StockMetadata.ticker, e.StockMetadata.stock_id).where(
             e.StockMetadata.ticker.in_(tickers)
         )
-    )
+
+    result = await conn.execute(stmt)
     return {ticker: stock_id for ticker, stock_id in result.all()}
 
 
@@ -204,3 +210,54 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
     await upsert_table(conn, e.AnalyticData, analytics_df)
     await upsert_table(conn, e.FundamentalData, fundamental_df)
     await upsert_table(conn, e.DynamicData, dynamic_df)
+
+
+async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
+    """Inserts dynamic data into the database."""
+
+    # rename mapping
+    renamed_df = snake_case_columns(raw_df)
+
+    # separate data: metadata, analyctics, fundamental, dynamic
+    _, analytics_df, fundamental_df, dynamic_df = metadata_separation(renamed_df)
+    analytics_df[["retrieve_at"]] = pd.Timestamp.now()
+    fundamental_df[["retrieve_at"]] = pd.Timestamp.now()
+    dynamic_df[["retrieve_at"]] = pd.Timestamp.now()
+
+    await upsert_table(conn, e.AnalyticData, analytics_df)
+    await upsert_table(conn, e.FundamentalData, fundamental_df)
+    await upsert_table(conn, e.DynamicData, dynamic_df)
+
+
+async def insert_price_data(conn, raw_df: pd.DataFrame):
+    """Inserts price data into the database."""
+
+    # attach stock_ids
+    price_df = (
+        raw_df
+        .drop_duplicates(subset=["stock_id", "date"], keep="last")
+        .reindex(columns=e.PriceData.__table__.columns.keys())
+        .copy()
+    )
+
+    await upsert_table(
+        conn, e.PriceData, price_df, on_conflict_columns=["stock_id", "date"]
+    )
+
+
+async def insert_shares_data(conn, raw_df: pd.DataFrame):
+    """Inserts shares history into the fundamental_data table."""
+
+    shares_df = (
+        raw_df.drop_duplicates(subset=["stock_id", "retrieve_at"], keep="last")
+        .dropna(subset=["stock_id", "retrieve_at"])
+        .reindex(columns=e.FundamentalData.__table__.columns.keys())
+        .copy()
+    )
+
+    await upsert_table(
+        conn,
+        e.FundamentalData,
+        shares_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
