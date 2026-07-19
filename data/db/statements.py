@@ -227,3 +227,19 @@ async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
     await upsert_table(conn, e.AnalyticData, analytics_df)
     await upsert_table(conn, e.FundamentalData, fundamental_df)
     await upsert_table(conn, e.DynamicData, dynamic_df)
+
+
+async def insert_price_data(conn, raw_df: pd.DataFrame):
+    """Inserts price data into the database."""
+
+    # attach stock_ids
+    price_df = (
+        raw_df
+        .drop_duplicates(subset=["stock_id", "date"], keep="last")
+        .reindex(columns=e.PriceData.__table__.columns.keys())
+        .copy()
+    )
+
+    await upsert_table(
+        conn, e.PriceData, price_df, on_conflict_columns=["stock_id", "date"]
+    )

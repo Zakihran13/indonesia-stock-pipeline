@@ -223,3 +223,23 @@ CREATE TABLE IF NOT EXISTS stock_market.analytic_data (
 );
 CREATE INDEX IF NOT EXISTS idx_analytic_data_retrieve_at 
     ON stock_market.analytic_data USING BRIN (retrieve_at);
+
+
+CREATE TABLE IF NOT EXISTS stock_market.price_data (
+    stock_id INTEGER NOT NULL,
+    ticker VARCHAR(50) NOT NULL,
+    date TIMESTAMP NOT NULL,
+    open NUMERIC(15, 4),
+    high NUMERIC(15, 4),
+    low NUMERIC(15, 4),
+    close NUMERIC(15, 4),
+    dividends NUMERIC(15, 4),
+    volume BIGINT,
+    stock_splits NUMERIC(15, 4),
+    
+    -- Constraints
+    PRIMARY KEY (stock_id, date),
+    FOREIGN KEY (stock_id) REFERENCES stock_market.metadata(stock_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_price_data_date 
+    ON stock_market.price_data USING BRIN (date);

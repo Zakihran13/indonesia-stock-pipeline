@@ -86,6 +86,9 @@ class StockMetadata(Base):
     analytic_data = relationship(
         "AnalyticData", back_populates="stock", cascade="all, delete-orphan"
     )
+    price_data = relationship(
+        "PriceData", back_populates="stock", cascade="all, delete-orphan"
+    )
 
 
 class DynamicData(Base):
@@ -293,3 +296,28 @@ class AnalyticData(Base):
     is_earnings_date_estimate: Mapped[Optional[bool]] = mapped_column(Boolean)
 
     stock = relationship("StockMetadata", back_populates="analytic_data")
+
+
+class PriceData(Base):
+    __tablename__ = "price_data"
+    __table_args__ = (
+        Index("idx_price_date", "date", postgresql_using="brin"),
+        {"schema": "stock_market"},
+    )
+
+    stock_id: Mapped[int] = mapped_column(
+        ForeignKey("stock_market.metadata.stock_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ticker: Mapped[str] = mapped_column(String(50))
+    date: Mapped[datetime] = mapped_column(DateTime, primary_key=True)
+
+    open: Mapped[Optional[float]] = mapped_column(Numeric(15, 4))
+    high: Mapped[Optional[float]] = mapped_column(Numeric(15, 4))
+    low: Mapped[Optional[float]] = mapped_column(Numeric(15, 4))
+    close: Mapped[Optional[float]] = mapped_column(Numeric(15, 4))
+    dividends: Mapped[Optional[float]] = mapped_column(Numeric(15, 4))
+    volume: Mapped[Optional[int]] = mapped_column(BigInteger)
+    stock_splits: Mapped[Optional[float]] = mapped_column(Numeric(15, 4))
+
+    stock = relationship("StockMetadata", back_populates="price_data")
