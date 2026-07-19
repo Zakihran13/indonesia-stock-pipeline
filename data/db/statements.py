@@ -243,3 +243,21 @@ async def insert_price_data(conn, raw_df: pd.DataFrame):
     await upsert_table(
         conn, e.PriceData, price_df, on_conflict_columns=["stock_id", "date"]
     )
+
+
+async def insert_shares_data(conn, raw_df: pd.DataFrame):
+    """Inserts shares history into the fundamental_data table."""
+
+    shares_df = (
+        raw_df.drop_duplicates(subset=["stock_id", "retrieve_at"], keep="last")
+        .dropna(subset=["stock_id", "retrieve_at"])
+        .reindex(columns=e.FundamentalData.__table__.columns.keys())
+        .copy()
+    )
+
+    await upsert_table(
+        conn,
+        e.FundamentalData,
+        shares_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
