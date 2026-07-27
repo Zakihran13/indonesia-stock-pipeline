@@ -6,8 +6,12 @@ import math
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import DateTime
 from sqlalchemy.sql.sqltypes import BigInteger, Integer, Numeric, String, Text
 import pandas as pd
+
+
+MAX_BIND_PARAMS_PER_STATEMENT = 30000
 
 
 def metadata_separation(df: pd.DataFrame):
@@ -60,6 +64,12 @@ def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
         if isinstance(column.type, (Integer, BigInteger))
     }
 
+    datetime_columns = {
+        column.name: column.type
+        for column in table.__table__.columns
+        if isinstance(column.type, DateTime)
+    }
+
     def sanitize_numeric(value, numeric_type: Numeric):
         if value is None:
             return None
@@ -103,6 +113,25 @@ def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
 
         return int_value
 
+    def sanitize_datetime(value, datetime_type: DateTime):
+        if value is None:
+            return None
+
+        if isinstance(value, pd.Timestamp):
+            if pd.isna(value):
+                return None
+
+            ts = value
+            if ts.tzinfo is not None and not datetime_type.timezone:
+                ts = ts.tz_convert("UTC").tz_localize(None)
+
+            return ts.to_pydatetime()
+
+        if pd.isna(value):
+            return None
+
+        return value
+
     for record in records:
         for column_name in string_columns:
             value = record.get(column_name)
@@ -121,7 +150,24 @@ def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
                     record.get(column_name), integer_type
                 )
 
+        for column_name, datetime_type in datetime_columns.items():
+            if column_name in record:
+                record[column_name] = sanitize_datetime(
+                    record.get(column_name), datetime_type
+                )
+
     return records
+
+
+def _iter_record_batches(records: list[dict], columns_per_row: int):
+    """Yields record chunks that stay below the DB bind-parameter threshold."""
+    if not records:
+        return
+
+    batch_size = max(1, MAX_BIND_PARAMS_PER_STATEMENT // max(1, columns_per_row))
+
+    for i in range(0, len(records), batch_size):
+        yield records[i : i + batch_size]
 
 
 async def upsert_table(
@@ -138,18 +184,25 @@ async def upsert_table(
         table.__table__.primary_key.columns.keys()
     )
     primary_key_columns = set(table.__table__.primary_key.columns.keys())
-    stmt = insert(table).values(dataframe_to_records(table, df))
+    records = dataframe_to_records(table, df)
 
-    stmt = stmt.on_conflict_do_update(
-        index_elements=conflict_columns,
-        set_={
-            c.name: getattr(stmt.excluded, c.name)
-            for c in stmt.excluded
-            if c.name not in conflict_columns and c.name not in primary_key_columns
-        },
-    )
+    if not records:
+        return
 
-    await conn.execute(stmt)
+    # Chunk inserts so we do not exceed asyncpg/Postgres bind parameter limits.
+    for record_batch in _iter_record_batches(records, len(table.__table__.columns)):
+        stmt = insert(table).values(record_batch)
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=conflict_columns,
+            set_={
+                c.name: getattr(stmt.excluded, c.name)
+                for c in stmt.excluded
+                if c.name not in conflict_columns and c.name not in primary_key_columns
+            },
+        )
+
+        await conn.execute(stmt)
 
 
 async def fetch_stock_ids(
@@ -234,8 +287,7 @@ async def insert_price_data(conn, raw_df: pd.DataFrame):
 
     # attach stock_ids
     price_df = (
-        raw_df
-        .drop_duplicates(subset=["stock_id", "date"], keep="last")
+        raw_df.drop_duplicates(subset=["stock_id", "date"], keep="last")
         .reindex(columns=e.PriceData.__table__.columns.keys())
         .copy()
     )
