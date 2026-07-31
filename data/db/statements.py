@@ -14,6 +14,12 @@ import pandas as pd
 MAX_BIND_PARAMS_PER_STATEMENT = 30000
 
 
+def utc_now_naive() -> pd.Timestamp:
+    """Returns current UTC time as a naive timestamp for TIMESTAMP columns."""
+
+    return pd.Timestamp.now(tz="UTC").tz_localize(None)
+
+
 def metadata_separation(df: pd.DataFrame):
     metadata_df = (
         df.reindex(columns=e.StockMetadata.__table__.columns.keys())
@@ -242,10 +248,11 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
     metadata_df, analytics_df, fundamental_df, dynamic_df = metadata_separation(
         renamed_df
     )
-    metadata_df[["created_at", "updated_at"]] = pd.Timestamp.now()
-    analytics_df[["retrieve_at"]] = pd.Timestamp.now()
-    fundamental_df[["retrieve_at"]] = pd.Timestamp.now()
-    dynamic_df[["retrieve_at"]] = pd.Timestamp.now()
+    now_utc = utc_now_naive()
+    metadata_df[["created_at", "updated_at"]] = now_utc
+    analytics_df[["retrieve_at"]] = now_utc
+    fundamental_df[["retrieve_at"]] = now_utc
+    dynamic_df[["retrieve_at"]] = now_utc
 
     # insertion
     await upsert_table(
@@ -273,9 +280,10 @@ async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
 
     # separate data: metadata, analyctics, fundamental, dynamic
     _, analytics_df, fundamental_df, dynamic_df = metadata_separation(renamed_df)
-    analytics_df[["retrieve_at"]] = pd.Timestamp.now()
-    fundamental_df[["retrieve_at"]] = pd.Timestamp.now()
-    dynamic_df[["retrieve_at"]] = pd.Timestamp.now()
+    now_utc = utc_now_naive()
+    analytics_df[["retrieve_at"]] = now_utc
+    fundamental_df[["retrieve_at"]] = now_utc
+    dynamic_df[["retrieve_at"]] = now_utc
 
     await upsert_table(conn, e.AnalyticData, analytics_df)
     await upsert_table(conn, e.FundamentalData, fundamental_df)

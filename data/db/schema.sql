@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS stock_market.metadata (
     exchange_timezone_name VARCHAR(100),
     exchange_timezone_short_name VARCHAR(20),
     gmt_off_set_milliseconds BIGINT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+    updated_at TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC')
 );
 CREATE INDEX IF NOT EXISTS idx_metadata_ticker ON stock_market.metadata (ticker);
 CREATE INDEX IF NOT EXISTS idx_metadata_symbol ON stock_market.metadata (symbol);
