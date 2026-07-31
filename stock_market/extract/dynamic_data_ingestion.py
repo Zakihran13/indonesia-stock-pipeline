@@ -1,5 +1,7 @@
+from dotenv import load_dotenv
 import pandas as pd
-from sqlalchemy.util import symbol
+import sys
+from pathlib import Path
 import yfinance as yf
 
 from functools import partial
@@ -9,6 +11,13 @@ import nest_asyncio
 
 nest_asyncio.apply()
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+env_path = PROJECT_ROOT / ".env"
+load_dotenv(dotenv_path=env_path)
 
 
 from data.db.statements import insert_dynamic_data, fetch_stock_ids, attach_stock_ids
