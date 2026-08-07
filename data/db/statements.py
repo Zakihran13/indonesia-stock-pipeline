@@ -1,5 +1,6 @@
 from utils.helper import snake_case_columns
 import data.db.entities as e
+import data.db.entities_transformed as et
 from decimal import Decimal, InvalidOperation
 import math
 
@@ -9,7 +10,6 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import DateTime
 from sqlalchemy.sql.sqltypes import BigInteger, Integer, Numeric, String, Text
 import pandas as pd
-
 
 MAX_BIND_PARAMS_PER_STATEMENT = 30000
 
@@ -248,7 +248,7 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
     metadata_df, analytics_df, fundamental_df, dynamic_df = metadata_separation(
         renamed_df
     )
-    now_utc = utc_now_naive()
+    now_utc = utc_now_naive().date()
     metadata_df[["created_at", "updated_at"]] = now_utc
     analytics_df[["retrieve_at"]] = now_utc
     fundamental_df[["retrieve_at"]] = now_utc
@@ -267,9 +267,9 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
     fundamental_df = attach_stock_ids(fundamental_df, metadata_df, stock_ids)
     dynamic_df = attach_stock_ids(dynamic_df, metadata_df, stock_ids)
 
-    await upsert_table(conn, e.AnalyticData, analytics_df)
-    await upsert_table(conn, e.FundamentalData, fundamental_df)
-    await upsert_table(conn, e.DynamicData, dynamic_df)
+    await upsert_table(conn, e.AnalyticData, analytics_df, on_conflict_columns=["stock_id", "retrieve_at"])
+    await upsert_table(conn, e.FundamentalData, fundamental_df, on_conflict_columns=["stock_id", "retrieve_at"])
+    await upsert_table(conn, e.DynamicData, dynamic_df, on_conflict_columns=["stock_id", "retrieve_at"])
 
 
 async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
@@ -285,9 +285,9 @@ async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
     fundamental_df[["retrieve_at"]] = now_utc
     dynamic_df[["retrieve_at"]] = now_utc
 
-    await upsert_table(conn, e.AnalyticData, analytics_df)
-    await upsert_table(conn, e.FundamentalData, fundamental_df)
-    await upsert_table(conn, e.DynamicData, dynamic_df)
+    await upsert_table(conn, e.AnalyticData, analytics_df, on_conflict_columns=["stock_id", "retrieve_at"])
+    await upsert_table(conn, e.FundamentalData, fundamental_df, on_conflict_columns=["stock_id", "retrieve_at"])
+    await upsert_table(conn, e.DynamicData, dynamic_df, on_conflict_columns=["stock_id", "retrieve_at"])
 
 
 async def insert_price_data(conn, raw_df: pd.DataFrame):
@@ -321,3 +321,36 @@ async def insert_shares_data(conn, raw_df: pd.DataFrame):
         shares_df,
         on_conflict_columns=["stock_id", "retrieve_at"],
     )
+
+
+async def get_metadata(conn, tickers: list[str] | None = None) -> pd.DataFrame:
+    """Fetches metadata from the database."""
+    if not tickers:
+        stmt = select(et.MetadataView)
+    else:
+        stmt = select(et.MetadataView).where(et.MetadataView.ticker.in_(tickers))
+
+    result = await conn.execute(stmt)
+    rows = result.fetchall()
+    df = pd.DataFrame(rows, columns=result.keys())
+    return df
+
+
+async def get_fundamental_data(conn, tickers: list[str] | None = None) -> pd.DataFrame:
+    """Fetches fundamental data from the database."""
+    if not tickers:
+        stmt = select(et.FundamentalDataView)
+    else:
+        stmt = (
+            select(et.FundamentalDataView)
+            .join(
+                et.MetadataView,
+                et.FundamentalDataView.stock_id == et.MetadataView.stock_id,
+            )
+            .where(et.MetadataView.ticker.in_(tickers))
+        )
+
+    result = await conn.execute(stmt)
+    rows = result.fetchall()
+    df = pd.DataFrame(rows, columns=result.keys())
+    return df

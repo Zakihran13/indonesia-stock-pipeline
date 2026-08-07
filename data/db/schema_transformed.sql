@@ -16,7 +16,12 @@ SELECT
         SELECT
             officer ->> 'name'
         FROM
-            json_array_elements(company_officers) AS officer
+            json_array_elements(
+                CASE
+                    WHEN json_typeof(company_officers) = 'array' THEN company_officers
+                    ELSE '[]'::json
+                END
+            ) AS officer
         WHERE
             officer ->> 'title' ILIKE '%CEO%'
         LIMIT
@@ -25,7 +30,7 @@ SELECT
     CONCAT_WS(', ', address1, city, country) AS full_address,
     (gmt_off_set_milliseconds / 3600000.0) AS gmt_offset_hours,
     exchange_timezone_name,
-    created_at AT TIME ZONE 'UTC' AS created_at_utc
+    created_at
 FROM
     stock_market.metadata;
 
@@ -33,7 +38,7 @@ CREATE
 OR REPLACE VIEW stock_market_clean.fundamental_data AS
 SELECT
     stock_id,
-    retrieve_at AT TIME ZONE 'UTC' AS retrieve_at_utc,
+    DATE(retrieve_at) AS retrieve_at,
     market_cap,
     enterprise_value,
     shares_outstanding,
@@ -57,7 +62,7 @@ CREATE
 OR REPLACE VIEW stock_market_clean.dynamic_data AS
 SELECT
     stock_id,
-    retrieve_at AT TIME ZONE 'UTC' AS retrieve_at_utc,
+    DATE(retrieve_at) AS retrieve_at,
     current_price,
     previous_close,
     open,
@@ -80,7 +85,7 @@ CREATE
 OR REPLACE VIEW stock_market_clean.analytic_data AS
 SELECT
     stock_id,
-    retrieve_at AT TIME ZONE 'UTC' AS retrieve_at_utc,
+    DATE(retrieve_at) AS retrieve_at,
     target_low_price,
     target_mean_price,
     target_high_price,
