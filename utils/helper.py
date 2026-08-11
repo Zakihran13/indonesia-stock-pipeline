@@ -93,5 +93,5 @@ def log_bulk_write_results(results: list) -> None:
         f"**_Upsert data successful!_** "
         f"Total Matched: {total_matched} | "
         f"Total Modified: {total_modified} | "
-        f"Total Upserted: {total_upserted}"
+        f"Total Inserted: {total_upserted}"
     )

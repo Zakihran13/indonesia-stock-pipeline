@@ -25,7 +25,7 @@ load_dotenv(dotenv_path=env_path)
 
 
 from data.db.statements_mongo import upsert_data
-from utils.helper import split_batch
+from utils.helper import split_batch, snake_case_columns
 from data.db.client import get_async_mongodb
 from stock_market.config import get_stock_list_path
 
@@ -45,7 +45,15 @@ async def process_ticker(ticker: list[str], collection: AsyncIOMotorCollection):
             )
 
         if metadata_list:
-            await upsert_data(collection, pd.DataFrame(metadata_list), ["ticker"])
+            metadata_df = pd.DataFrame(metadata_list)
+            metadata_df = snake_case_columns(metadata_df)
+            metadata_df["market_date"] = (
+                pd.to_datetime(metadata_df["regular_market_time"], unit="s", utc=True)
+                    .dt.normalize()
+            )
+            metadata_df = metadata_df.replace({np.nan: None})
+
+            await upsert_data(collection, metadata_df, ["ticker", "market_date"])
 
     except Exception as e:
         print(f"Error fetching metadata for {flatten_ticker}: {e}")
@@ -66,9 +74,9 @@ async def exec_metadata():
 
     # creating index for first running
     await collection.create_index(
-        [("ticker", 1)],
+        [("ticker", 1), ("market_date", 1)],
         unique=1,
-        name="ticker_unique",
+        name="ticker_date_unique",
     )
 
     try:
