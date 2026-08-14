@@ -48,7 +48,7 @@ YF_HISTORICAL_INTERVAL = os.getenv("YF_HISTORICAL_INTERVAL", "1d")
 YF_HISTORICAL_TIMEOUT_SECONDS = int(os.getenv("YF_HISTORICAL_TIMEOUT_SECONDS", "30"))
 
 
-def _build_history_kwargs() -> dict[str, Any]:
+def _build_history_kwargs(period: str) -> dict[str, Any]:
     """Builds yfinance history kwargs from configured date/period settings."""
 
     history_kwargs: dict[str, Any] = {"interval": YF_HISTORICAL_INTERVAL}
@@ -60,7 +60,7 @@ def _build_history_kwargs() -> dict[str, Any]:
         history_kwargs["end"] = YF_HISTORICAL_END
 
     if "start" not in history_kwargs and "end" not in history_kwargs:
-        history_kwargs["period"] = YF_HISTORICAL_PERIOD
+        history_kwargs["period"] = period
 
     history_kwargs["timeout"] = YF_HISTORICAL_TIMEOUT_SECONDS
 
@@ -74,7 +74,7 @@ def _fetch_history_blocking(flatten_ticker: str, history_kwargs: dict[str, Any])
     return tickers.history(**history_kwargs)
 
 
-async def process_historical_price_data(collection: AsyncIOMotorCollection, ticker: list[str]):
+async def process_historical_price_data(collection: AsyncIOMotorCollection, ticker: list[str], period: str):
     """Fetches historical price data for a ticker batch using yfinance."""
 
     flatten_ticker = " ".join(ticker)
@@ -82,7 +82,7 @@ async def process_historical_price_data(collection: AsyncIOMotorCollection, tick
     logger.debug("Fetching historical price data for batch of {} tickers", len(ticker))
 
     try:
-        history_kwargs = _build_history_kwargs()
+        history_kwargs = _build_history_kwargs(period)
         logger.debug("Calling yfinance history with params: {}", history_kwargs)
         price_data = _fetch_history_blocking(flatten_ticker, history_kwargs)
 
@@ -115,7 +115,7 @@ async def process_historical_price_data(collection: AsyncIOMotorCollection, tick
 
 
 
-async def exec_historical_price_data(tickers: list[str] | None = None) -> None:
+async def exec_historical_price_data(tickers: list[str] | None = None, period: str = YF_HISTORICAL_PERIOD) -> None:
     """Fetches historical price data for all tickers and stores it in the database."""
 
     logger.info("Starting historical price ingestion")
@@ -140,7 +140,7 @@ async def exec_historical_price_data(tickers: list[str] | None = None) -> None:
             logger.warning("No tickers found in metadata table. Skipping ingestion.")
             return
 
-        batches = split_batch(tickers, 5)
+        batches = split_batch(tickers, 50)
         logger.info(
             "Prepared {} ticker batches (batch size: 5) from {} tickers",
             len(batches),
@@ -149,7 +149,7 @@ async def exec_historical_price_data(tickers: list[str] | None = None) -> None:
 
         try:
             tasks = [
-                partial(process_historical_price_data, collection, batch)
+                partial(process_historical_price_data, collection, batch, period)
                 for batch in batches
             ]
 

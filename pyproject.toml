@@ -5,7 +5,7 @@ description = "ETL pipeline for Indonesian stock portfolio analytics"
 authors = [
     {name = "Zakihran13",email = "zakisuzaki13@gmail.com"}
 ]
-requires-python = ">=3.12, <3.16"
+requires-python = ">=3.12, <3.15"
 dependencies = [
     "numpy (>=1.26.0,<3.0.0)",
     "pandas (>=2.2.0,<3.0.0)",
@@ -18,12 +18,14 @@ dependencies = [
     "openpyxl (>=3.1.5,<4.0.0)",
     "aiometer (>=1.0.0,<2.0.0)",
     "nest-asyncio (>=1.6.0,<2.0.0)",
-    "dotenv (>=0.9.9,<0.10.0)",
+    "python-dotenv (>=1.0.0,<2.0.0)",
     "asyncpg (>=0.31.0,<0.32.0)",
     "sqlparse (>=0.5.5,<0.6.0)",
     "inflection (>=0.5.1,<0.6.0)",
     "pymongo (>=4.17.0,<5.0.0)",
     "motor (>=3.7.1,<4.0.0)",
+    "apache-airflow (>=3.3.0,<4.0.0)",
+    "graphviz (>=0.21,<0.22)",
 ]
 
 
