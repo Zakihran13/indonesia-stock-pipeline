@@ -1,115 +1,101 @@
-CREATE SCHEMA IF NOT EXISTS stock_market_clean;
+-- Create the schema
+CREATE SCHEMA IF NOT EXISTS stock_market;
 
-CREATE
-OR REPLACE VIEW stock_market_clean.metadata AS
-SELECT
-    stock_id,
-    ticker,
-    symbol,
-    COALESCE(short_name, long_name) AS company_name,
-    sector_disp AS sector,
-    industry_disp AS industry,
-    exchange,
-    market,
-    full_time_employees,
-    (
-        SELECT
-            officer ->> 'name'
-        FROM
-            json_array_elements(
-                CASE
-                    WHEN json_typeof(company_officers) = 'array' THEN company_officers
-                    ELSE '[]'::json
-                END
-            ) AS officer
-        WHERE
-            officer ->> 'title' ILIKE '%CEO%'
-        LIMIT
-            1
-    ) AS ceo_name,
-    CONCAT_WS(', ', address1, city, country) AS full_address,
-    (gmt_off_set_milliseconds / 3600000.0) AS gmt_offset_hours,
-    exchange_timezone_name,
-    created_at
-FROM
-    stock_market.metadata;
+-- 1. Create the parent Metadata table
+CREATE TABLE stock_market.metadata (
+    stock_id SERIAL PRIMARY KEY,
+    ticker VARCHAR UNIQUE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    company_name VARCHAR,
+    sector VARCHAR,
+    industry VARCHAR,
+    exchange VARCHAR,
+    market VARCHAR,
+    full_time_employees INT,
+    ceo_name VARCHAR,
+    full_address VARCHAR,
+    gmt_offset_hours NUMERIC,
+    exchange_timezone_name VARCHAR,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
 
-CREATE
-OR REPLACE VIEW stock_market_clean.fundamental_data AS
-SELECT
-    stock_id,
-    DATE(retrieve_at) AS retrieve_at,
-    market_cap,
-    enterprise_value,
-    shares_outstanding,
-    trailing_pe,
-    forward_pe,
-    COALESCE(dividend_yield, 0) AS dividend_yield,
-    COALESCE(payout_ratio, 0) AS payout_ratio,
-    TO_TIMESTAMP(last_fiscal_year_end) AS last_fiscal_year_end_date,
-    TO_TIMESTAMP(most_recent_quarter) AS most_recent_quarter_date,
-    TO_TIMESTAMP(ex_dividend_date) AS ex_dividend_date,
-    TO_TIMESTAMP(last_dividend_date) AS last_dividend_date,
-    total_cash,
-    total_debt,
-    free_cashflow,
-    operating_cashflow,
-    return_on_equity
-FROM
-    stock_market.fundamental_data;
+-- 2. Create Fundamental Data table
+CREATE TABLE stock_market.fundamental_data (
+    stock_id INT,
+    retrieve_at TIMESTAMP,
+    market_cap BIGINT,
+    enterprise_value BIGINT,
+    shares_outstanding BIGINT,
+    trailing_pe NUMERIC,
+    forward_pe NUMERIC,
+    dividend_yield NUMERIC,
+    payout_ratio NUMERIC,
+    last_fiscal_year_end_date TIMESTAMP,
+    most_recent_quarter_date TIMESTAMP,
+    ex_dividend_date TIMESTAMP,
+    last_dividend_date TIMESTAMP,
+    total_cash BIGINT,
+    total_debt BIGINT,
+    free_cashflow BIGINT,
+    operating_cashflow BIGINT,
+    return_on_equity NUMERIC,
+    PRIMARY KEY (stock_id, retrieve_at),
+    FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
+);
 
-CREATE
-OR REPLACE VIEW stock_market_clean.dynamic_data AS
-SELECT
-    stock_id,
-    DATE(retrieve_at) AS retrieve_at,
-    current_price,
-    previous_close,
-    open,
-    day_low,
-    day_high,
-    volume,
-    average_volume_10days,
-    TO_TIMESTAMP(regular_market_time) AS regular_market_time_utc,
-    TO_TIMESTAMP(first_trade_date_milliseconds / 1000) AS first_trade_date_utc,
-    fifty_two_week_low,
-    fifty_two_week_high,
-    fifty_two_week_change_percent,
-    fifty_day_average,
-    two_hundred_day_average,
-    market_state
-FROM
-    stock_market.dynamic_data;
+-- 3. Create Dynamic Data table
+CREATE TABLE stock_market.dynamic_data (
+    stock_id INT,
+    retrieve_at TIMESTAMP,
+    current_price NUMERIC,
+    previous_close NUMERIC,
+    open NUMERIC,
+    day_low NUMERIC,
+    day_high NUMERIC,
+    volume BIGINT,
+    average_volume_10days BIGINT,
+    regular_market_time_utc TIMESTAMP,
+    first_trade_date_utc TIMESTAMP,
+    fifty_two_week_low NUMERIC,
+    fifty_two_week_high NUMERIC,
+    fifty_two_week_change_percent NUMERIC,
+    fifty_day_average NUMERIC,
+    two_hundred_day_average NUMERIC,
+    market_state VARCHAR,
+    PRIMARY KEY (stock_id, retrieve_at),
+    FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
+);
 
-CREATE
-OR REPLACE VIEW stock_market_clean.analytic_data AS
-SELECT
-    stock_id,
-    DATE(retrieve_at) AS retrieve_at,
-    target_low_price,
-    target_mean_price,
-    target_high_price,
-    UPPER(recommendation_key) AS recommendation_status,
-    average_analyst_rating,
-    number_of_analyst_opinions,
-    TO_TIMESTAMP(earnings_timestamp_start) AS earnings_start_date,
-    TO_TIMESTAMP(earnings_timestamp_end) AS earnings_end_date,
-    is_earnings_date_estimate
-FROM
-    stock_market.analytic_data;
+-- 4. Create Analytic Data table
+CREATE TABLE stock_market.analytic_data (
+    stock_id INT,
+    retrieve_at TIMESTAMP,
+    target_low_price NUMERIC,
+    target_mean_price NUMERIC,
+    target_high_price NUMERIC,
+    recommendation_status VARCHAR,
+    average_analyst_rating VARCHAR,
+    number_of_analyst_opinions INT,
+    earnings_start_date TIMESTAMP,
+    earnings_end_date TIMESTAMP,
+    is_earnings_date_estimate BOOLEAN,
+    PRIMARY KEY (stock_id, retrieve_at),
+    FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
+);
 
-CREATE
-OR REPLACE VIEW stock_market_clean.price_data AS
-SELECT
-    stock_id,
-    ticker,
-    DATE(date) AS trade_date,
-    open,
-    high,
-    low,
-    close,
-    volume,
-    COALESCE(dividends, 0) AS dividends,
-    COALESCE(stock_splits, 0) AS stock_splits
-FROM
-    stock_market.price_data;
+-- 5. Create Price Data table
+CREATE TABLE stock_market.price_data (
+    stock_id INT,
+    trade_date DATE,
+    ticker VARCHAR,
+    open NUMERIC,
+    high NUMERIC,
+    low NUMERIC,
+    close NUMERIC,
+    volume BIGINT,
+    dividends NUMERIC,
+    stock_splits NUMERIC,
+    PRIMARY KEY (stock_id, trade_date),
+    FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
+);

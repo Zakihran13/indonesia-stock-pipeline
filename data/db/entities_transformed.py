@@ -7,18 +7,19 @@ from sqlalchemy import (
     Date,
     BigInteger,
     Boolean,
+    ForeignKey,
 )
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
 
 
-class MetadataView(Base):
+class StockMetadata(Base):
     __tablename__ = "metadata"
-    __table_args__ = {"schema": "stock_market_clean"}
+    __table_args__ = {"schema": "stock_market"}
 
     # Primary Key
-    stock_id = Column(Integer, primary_key=True)
+    stock_id = Column(Integer, primary_key=True, autoincrement=True)
 
     # Columns
     ticker = Column(String)
@@ -33,16 +34,21 @@ class MetadataView(Base):
     full_address = Column(String)
     gmt_offset_hours = Column(Numeric)
     exchange_timezone_name = Column(String)
-    created_at_utc = Column(DateTime)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
 
 
-class FundamentalDataView(Base):
+class FundamentalData(Base):
     __tablename__ = "fundamental_data"
-    __table_args__ = {"schema": "stock_market_clean"}
+    __table_args__ = {"schema": "stock_market"}
 
     # Composite Primary Key for snapshot data
-    stock_id = Column(Integer, primary_key=True)
-    retrieve_at_utc = Column(DateTime, primary_key=True)
+    stock_id = Column(
+        Integer, 
+        ForeignKey("stock_market.metadata.stock_id"), 
+        primary_key=True
+    )
+    retrieve_at = Column(DateTime, primary_key=True)
 
     # Columns
     market_cap = Column(BigInteger)
@@ -63,13 +69,17 @@ class FundamentalDataView(Base):
     return_on_equity = Column(Numeric)
 
 
-class DynamicDataView(Base):
+class DynamicData(Base):
     __tablename__ = "dynamic_data"
-    __table_args__ = {"schema": "stock_market_clean"}
+    __table_args__ = {"schema": "stock_market"}
 
     # Composite Primary Key for snapshot data
-    stock_id = Column(Integer, primary_key=True)
-    retrieve_at_utc = Column(DateTime, primary_key=True)
+    stock_id = Column(
+        Integer, 
+        ForeignKey("stock_market.metadata.stock_id"), 
+        primary_key=True
+    )
+    retrieve_at = Column(DateTime, primary_key=True)
 
     # Columns
     current_price = Column(Numeric)
@@ -89,34 +99,40 @@ class DynamicDataView(Base):
     market_state = Column(String)
 
 
-class AnalyticDataView(Base):
+class AnalyticData(Base):
     __tablename__ = "analytic_data"
-    __table_args__ = {"schema": "stock_market_clean"}
+    __table_args__ = {"schema": "stock_market"}
 
     # Composite Primary Key for snapshot data
-    stock_id = Column(Integer, primary_key=True)
-    retrieve_at_utc = Column(DateTime, primary_key=True)
+    stock_id = Column(
+        Integer, 
+        ForeignKey("stock_market.metadata.stock_id"), 
+        primary_key=True
+    )
+    retrieve_at = Column(DateTime, primary_key=True)
 
     # Columns
     target_low_price = Column(Numeric)
     target_mean_price = Column(Numeric)
     target_high_price = Column(Numeric)
     recommendation_status = Column(String)
-    average_analyst_rating = Column(
-        String
-    )  # Stored as string or numeric depending on your raw data (e.g., "1.5 - Buy")
+    average_analyst_rating = Column(String) 
     number_of_analyst_opinions = Column(Integer)
     earnings_start_date = Column(DateTime)
     earnings_end_date = Column(DateTime)
     is_earnings_date_estimate = Column(Boolean)
 
 
-class PriceDataView(Base):
+class PriceData(Base):
     __tablename__ = "price_data"
-    __table_args__ = {"schema": "stock_market_clean"}
+    __table_args__ = {"schema": "stock_market"}
 
     # Composite Primary Key for time-series data
-    stock_id = Column(Integer, primary_key=True)
+    stock_id = Column(
+        Integer, 
+        ForeignKey("stock_market.metadata.stock_id"), 
+        primary_key=True
+    )
     trade_date = Column(Date, primary_key=True)
 
     # Columns

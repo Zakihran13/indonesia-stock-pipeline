@@ -1,5 +1,4 @@
-from utils.helper import snake_case_columns
-import data.db.entities as e
+from utils.helper import snake_case_columns, dataframe_to_records
 import data.db.entities_transformed as et
 from decimal import Decimal, InvalidOperation
 import math
@@ -22,147 +21,17 @@ def utc_now_naive() -> pd.Timestamp:
 
 def metadata_separation(df: pd.DataFrame):
     metadata_df = (
-        df.reindex(columns=e.StockMetadata.__table__.columns.keys())
+        df.reindex(columns=et.StockMetadata.__table__.columns.keys())
         .copy()
         .drop(columns=["stock_id"], errors="ignore")
     )
-    analytics_df = df.reindex(columns=e.AnalyticData.__table__.columns.keys()).copy()
+    analytics_df = df.reindex(columns=et.AnalyticData.__table__.columns.keys()).copy()
     fundamental_df = df.reindex(
-        columns=e.FundamentalData.__table__.columns.keys()
+        columns=et.FundamentalData.__table__.columns.keys()
     ).copy()
-    dynamic_df = df.reindex(columns=e.DynamicData.__table__.columns.keys()).copy()
+    dynamic_df = df.reindex(columns=et.DynamicData.__table__.columns.keys()).copy()
 
     return metadata_df, analytics_df, fundamental_df, dynamic_df
-
-
-def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
-    """Convert a DataFrame into DB-safe records.
-
-    Pandas uses NaN/NaT for missing values, but the database layer expects None
-    so those values become SQL NULL.
-
-    Some Yahoo payload fields come as numeric values for string DB columns
-    (e.g. fax/phone can be 0). Coerce those to strings before binding.
-
-    Some numeric fields can exceed DB precision (NUMERIC(p,s)); these are
-    converted to None to avoid asyncpg numeric overflow errors.
-    """
-    sanitized = df.astype(object).where(pd.notna(df), None)
-    records = sanitized.to_dict(orient="records")
-
-    column_by_name = {column.name: column for column in table.__table__.columns}
-
-    string_columns = {
-        column.name
-        for column in table.__table__.columns
-        if isinstance(column.type, (String, Text))
-    }
-
-    numeric_columns = {
-        column.name: column.type
-        for column in table.__table__.columns
-        if isinstance(column.type, Numeric)
-    }
-
-    integer_columns = {
-        column.name: column.type
-        for column in table.__table__.columns
-        if isinstance(column.type, (Integer, BigInteger))
-    }
-
-    datetime_columns = {
-        column.name: column.type
-        for column in table.__table__.columns
-        if isinstance(column.type, DateTime)
-    }
-
-    def sanitize_numeric(value, numeric_type: Numeric):
-        if value is None:
-            return None
-
-        try:
-            decimal_value = Decimal(str(value))
-        except (InvalidOperation, ValueError, TypeError):
-            return None
-
-        if not decimal_value.is_finite():
-            return None
-
-        precision = numeric_type.precision
-        scale = numeric_type.scale
-
-        if precision is not None and scale is not None:
-            limit = Decimal(10) ** (precision - scale)
-            if abs(decimal_value) >= limit:
-                return None
-
-        return float(decimal_value)
-
-    def sanitize_integer(value, integer_type):
-        if value is None:
-            return None
-
-        if isinstance(value, bool):
-            return int(value)
-
-        if isinstance(value, float) and not math.isfinite(value):
-            return None
-
-        try:
-            int_value = int(value)
-        except (TypeError, ValueError):
-            return None
-
-        if isinstance(integer_type, BigInteger):
-            if int_value < -9223372036854775808 or int_value > 9223372036854775807:
-                return None
-
-        return int_value
-
-    def sanitize_datetime(value, datetime_type: DateTime):
-        if value is None:
-            return None
-
-        if isinstance(value, pd.Timestamp):
-            if pd.isna(value):
-                return None
-
-            ts = value
-            if ts.tzinfo is not None and not datetime_type.timezone:
-                ts = ts.tz_convert("UTC").tz_localize(None)
-
-            return ts.to_pydatetime()
-
-        if pd.isna(value):
-            return None
-
-        return value
-
-    for record in records:
-        for column_name in string_columns:
-            value = record.get(column_name)
-            if value is not None and not isinstance(value, str):
-                record[column_name] = str(value)
-
-        for column_name, numeric_type in numeric_columns.items():
-            if column_name in record:
-                record[column_name] = sanitize_numeric(
-                    record.get(column_name), numeric_type
-                )
-
-        for column_name, integer_type in integer_columns.items():
-            if column_name in record:
-                record[column_name] = sanitize_integer(
-                    record.get(column_name), integer_type
-                )
-
-        for column_name, datetime_type in datetime_columns.items():
-            if column_name in record:
-                record[column_name] = sanitize_datetime(
-                    record.get(column_name), datetime_type
-                )
-
-    return records
 
 
 def _iter_record_batches(records: list[dict], columns_per_row: int):
@@ -215,10 +84,10 @@ async def fetch_stock_ids(
     conn: AsyncConnection, tickers: list[str] | None = None
 ) -> dict[str, int]:
     if not tickers:
-        stmt = select(e.StockMetadata.ticker, e.StockMetadata.stock_id)
+        stmt = select(et.StockMetadata.ticker, et.StockMetadata.stock_id)
     else:
-        stmt = select(e.StockMetadata.ticker, e.StockMetadata.stock_id).where(
-            e.StockMetadata.ticker.in_(tickers)
+        stmt = select(et.StockMetadata.ticker, et.StockMetadata.stock_id).where(
+            et.StockMetadata.ticker.in_(tickers)
         )
 
     result = await conn.execute(stmt)
@@ -256,7 +125,7 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
 
     # insertion
     await upsert_table(
-        conn, e.StockMetadata, metadata_df, on_conflict_columns=["ticker"]
+        conn, et.StockMetadata, metadata_df, on_conflict_columns=["ticker"]
     )
 
     stock_ids = await fetch_stock_ids(
@@ -267,9 +136,24 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
     fundamental_df = attach_stock_ids(fundamental_df, metadata_df, stock_ids)
     dynamic_df = attach_stock_ids(dynamic_df, metadata_df, stock_ids)
 
-    await upsert_table(conn, e.AnalyticData, analytics_df, on_conflict_columns=["stock_id", "retrieve_at"])
-    await upsert_table(conn, e.FundamentalData, fundamental_df, on_conflict_columns=["stock_id", "retrieve_at"])
-    await upsert_table(conn, e.DynamicData, dynamic_df, on_conflict_columns=["stock_id", "retrieve_at"])
+    await upsert_table(
+        conn,
+        et.AnalyticData,
+        analytics_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
+    await upsert_table(
+        conn,
+        et.FundamentalData,
+        fundamental_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
+    await upsert_table(
+        conn,
+        et.DynamicData,
+        dynamic_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
 
 
 async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
@@ -285,9 +169,24 @@ async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
     fundamental_df[["retrieve_at"]] = now_utc
     dynamic_df[["retrieve_at"]] = now_utc
 
-    await upsert_table(conn, e.AnalyticData, analytics_df, on_conflict_columns=["stock_id", "retrieve_at"])
-    await upsert_table(conn, e.FundamentalData, fundamental_df, on_conflict_columns=["stock_id", "retrieve_at"])
-    await upsert_table(conn, e.DynamicData, dynamic_df, on_conflict_columns=["stock_id", "retrieve_at"])
+    await upsert_table(
+        conn,
+        et.AnalyticData,
+        analytics_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
+    await upsert_table(
+        conn,
+        et.FundamentalData,
+        fundamental_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
+    await upsert_table(
+        conn,
+        et.DynamicData,
+        dynamic_df,
+        on_conflict_columns=["stock_id", "retrieve_at"],
+    )
 
 
 async def insert_price_data(conn, raw_df: pd.DataFrame):
@@ -296,12 +195,12 @@ async def insert_price_data(conn, raw_df: pd.DataFrame):
     # attach stock_ids
     price_df = (
         raw_df.drop_duplicates(subset=["stock_id", "date"], keep="last")
-        .reindex(columns=e.PriceData.__table__.columns.keys())
+        .reindex(columns=et.PriceData.__table__.columns.keys())
         .copy()
     )
 
     await upsert_table(
-        conn, e.PriceData, price_df, on_conflict_columns=["stock_id", "date"]
+        conn, et.PriceData, price_df, on_conflict_columns=["stock_id", "date"]
     )
 
 
@@ -311,13 +210,13 @@ async def insert_shares_data(conn, raw_df: pd.DataFrame):
     shares_df = (
         raw_df.drop_duplicates(subset=["stock_id", "retrieve_at"], keep="last")
         .dropna(subset=["stock_id", "retrieve_at"])
-        .reindex(columns=e.FundamentalData.__table__.columns.keys())
+        .reindex(columns=et.FundamentalData.__table__.columns.keys())
         .copy()
     )
 
     await upsert_table(
         conn,
-        e.FundamentalData,
+        et.FundamentalData,
         shares_df,
         on_conflict_columns=["stock_id", "retrieve_at"],
     )
@@ -326,9 +225,9 @@ async def insert_shares_data(conn, raw_df: pd.DataFrame):
 async def get_metadata(conn, tickers: list[str] | None = None) -> pd.DataFrame:
     """Fetches metadata from the database."""
     if not tickers:
-        stmt = select(et.MetadataView)
+        stmt = select(et.StockMetadata)
     else:
-        stmt = select(et.MetadataView).where(et.MetadataView.ticker.in_(tickers))
+        stmt = select(et.StockMetadata).where(et.StockMetadata.ticker.in_(tickers))
 
     result = await conn.execute(stmt)
     rows = result.fetchall()
@@ -339,15 +238,15 @@ async def get_metadata(conn, tickers: list[str] | None = None) -> pd.DataFrame:
 async def get_fundamental_data(conn, tickers: list[str] | None = None) -> pd.DataFrame:
     """Fetches fundamental data from the database."""
     if not tickers:
-        stmt = select(et.FundamentalDataView)
+        stmt = select(et.FundamentalData)
     else:
         stmt = (
-            select(et.FundamentalDataView)
+            select(et.FundamentalData)
             .join(
-                et.MetadataView,
-                et.FundamentalDataView.stock_id == et.MetadataView.stock_id,
+                et.FundamentalData,
+                et.FundamentalData.stock_id == et.StockMetadata.stock_id,
             )
-            .where(et.MetadataView.ticker.in_(tickers))
+            .where(et.FundamentalData.ticker.in_(tickers))
         )
 
     result = await conn.execute(stmt)
