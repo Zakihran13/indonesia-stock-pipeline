@@ -5,6 +5,7 @@ from pymongo import UpdateOne
 from loguru import logger
 from functools import partial
 import asyncio
+from datetime import datetime
 
 from utils.helper import split_batch, log_bulk_write_results
 
@@ -39,9 +40,7 @@ async def upsert_data(
         logger.info("DataFrame is empty. Nothing to upsert.")
         return
 
-    logger.info(
-        f"inserting data for: **{' '.join(pd.unique(data["ticker"]))}**"
-    )
+    logger.info(f"inserting data for: **{' '.join(pd.unique(data["ticker"]))}**")
     records = data.to_dict("records")
     batch_data = split_batch(records, 10_000)
     operation_tasks = [
@@ -54,3 +53,47 @@ async def upsert_data(
             log_bulk_write_results(results)
         except Exception as e:
             logger.error(f"An error occurred during bulk write: {e}")
+
+
+async def fetch_dynamic_raw(
+    coll: AsyncIOMotorCollection,
+    current_date: datetime,
+    ticker: List[str] | None = None,
+) -> pd.DataFrame | None:
+    params: dict[str, Any] = {
+        "created_at": {
+            "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        }
+    }
+
+    if ticker:
+        params["ticker"] = {"$in": ticker}
+
+    cursor = coll.find(params)
+    data = await cursor.to_list(length=None)
+
+    if data:
+        return pd.DataFrame(data)
+    return
+
+
+async def fetch_price_raw(
+    coll: AsyncIOMotorCollection,
+    current_date: datetime,
+    ticker: List[str] | None = None,
+) -> pd.DataFrame | None:
+    params: dict[str, Any] = {
+        "date": {
+            "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        }
+    }
+
+    if ticker:
+        params["ticker"] = {"$in": ticker}
+
+    cursor = coll.find(params)
+    data = await cursor.to_list(length=None)
+
+    if data:
+        return pd.DataFrame(data)
+    return

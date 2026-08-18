@@ -142,7 +142,7 @@ async def exec_historical_price_data(tickers: list[str] | None = None, period: s
 
         batches = split_batch(tickers, 50)
         logger.info(
-            "Prepared {} ticker batches (batch size: 5) from {} tickers",
+            "Prepared {} ticker batches (batch size: 50) from {} tickers",
             len(batches),
             len(tickers),
         )
