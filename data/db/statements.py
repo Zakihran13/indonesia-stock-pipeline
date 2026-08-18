@@ -193,14 +193,11 @@ async def insert_price_data(conn, raw_df: pd.DataFrame):
     """Inserts price data into the database."""
 
     # attach stock_ids
-    price_df = (
-        raw_df.drop_duplicates(subset=["stock_id", "date"], keep="last")
-        .reindex(columns=et.PriceData.__table__.columns.keys())
-        .copy()
-    )
+    raw_df = raw_df.rename(columns={"date": "trade_date"})
+    price_df = raw_df.reindex(columns=et.PriceData.__table__.columns.keys()).copy()
 
     await upsert_table(
-        conn, et.PriceData, price_df, on_conflict_columns=["stock_id", "date"]
+        conn, et.PriceData, price_df, on_conflict_columns=["stock_id", "trade_date"]
     )
 
 

@@ -6,6 +6,7 @@ import asyncio
 import nest_asyncio
 from datetime import datetime
 from loguru import logger
+import pandas as pd
 
 nest_asyncio.apply()
 import numpy as np
@@ -42,6 +43,13 @@ async def exec_dynamic_data(ticker: list[str] | None = None):
             all_tickers = await fetch_stock_ids(conn, ticker)
             metadata_df = metadata_df.replace({np.nan: None})
             metadata_df = attach_stock_ids(metadata_df, metadata_df, all_tickers)
+
+            metadata_df["created_at"] = pd.to_datetime(
+                metadata_df["created_at"]
+            ).dt.normalize()
+            metadata_df = metadata_df.drop_duplicates(
+                subset=["stock_id", "created_at"], keep="last"
+            )
 
             await insert_dynamic_data(conn, metadata_df)
     finally:

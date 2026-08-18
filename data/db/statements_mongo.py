@@ -75,3 +75,25 @@ async def fetch_dynamic_raw(
     if data:
         return pd.DataFrame(data)
     return
+
+
+async def fetch_price_raw(
+    coll: AsyncIOMotorCollection,
+    current_date: datetime,
+    ticker: List[str] | None = None,
+) -> pd.DataFrame | None:
+    params: dict[str, Any] = {
+        "date": {
+            "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        }
+    }
+
+    if ticker:
+        params["ticker"] = {"$in": ticker}
+
+    cursor = coll.find(params)
+    data = await cursor.to_list(length=None)
+
+    if data:
+        return pd.DataFrame(data)
+    return
