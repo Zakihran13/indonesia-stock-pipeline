@@ -24,14 +24,21 @@ from data.db.client import init_async_db, get_async_mongodb
 from data.db.statements_mongo import fetch_dynamic_raw
 
 
-async def exec_dynamic_data(ticker: list[str] | None = None):
+async def exec_dynamic_data(ticker: list[str] | None = None, start_date: datetime | None = None):
+    """Fetches dynamic snapshot data from the raw Mongo store and loads it into the analytics database.
+
+    `start_date` defaults to today, matching the daily incremental transform. Pass an
+    earlier date (e.g. to backfill historical gaps) to pull a wider range from Mongo.
+    """
+
     logger.info("Starting the DB Engine...")
     engine = init_async_db()
     engine_mongo = get_async_mongodb("raw_stock_data_ingestion")
     stock_raw = engine_mongo["raw_stock_data"]
 
-    logger.info("Fetching dynamic data!")
-    metadata_df = await fetch_dynamic_raw(stock_raw, datetime.now(), ticker)
+    query_date = start_date or datetime.now()
+    logger.info(f"Fetching dynamic data since {query_date.date()}!")
+    metadata_df = await fetch_dynamic_raw(stock_raw, query_date, ticker)
 
     if metadata_df is None or metadata_df.empty:
         logger.error(f"No data was found for: {ticker}")
@@ -41,6 +48,10 @@ async def exec_dynamic_data(ticker: list[str] | None = None):
     try:
         async with engine.begin() as conn:
             all_tickers = await fetch_stock_ids(conn, ticker)
+            if not all_tickers:
+                raise RuntimeError(
+                    "No transformed metadata records found. Run metadata ingestion first."
+                )
             metadata_df = metadata_df.replace({np.nan: None})
             metadata_df = attach_stock_ids(metadata_df, metadata_df, all_tickers)
 
@@ -57,4 +68,4 @@ async def exec_dynamic_data(ticker: list[str] | None = None):
 
 
 if __name__ == "__main__":
-    asyncio.run(exec_dynamic_data())
+    asyncio.run(exec_dynamic_data(start_date=datetime.fromisoformat("2000-01-01")))

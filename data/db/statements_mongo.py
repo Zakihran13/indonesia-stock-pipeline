@@ -17,6 +17,38 @@ async def fetch_stock_ids(coll: AsyncIOMotorCollection) -> List[str]:
     return [n["ticker"] for n in data if "ticker"]
 
 
+async def fetch_metadata_ticker_dates(
+    coll: AsyncIOMotorCollection, ticker: List[str] | None = None
+) -> pd.DataFrame:
+    """Fetches ticker/market_date pairs only, for gap/staleness detection."""
+    params: dict[str, Any] = {}
+    if ticker:
+        params["ticker"] = {"$in": ticker}
+
+    cursor = coll.find(params, {"ticker": 1, "market_date": 1, "_id": 0})
+    data = await cursor.to_list(length=None)
+
+    return pd.DataFrame(data) if data else pd.DataFrame(columns=["ticker", "market_date"])
+
+
+async def fetch_price_start_dates(
+    coll: AsyncIOMotorCollection, ticker: List[str] | None = None
+) -> pd.DataFrame:
+    """Fetches each ticker's earliest recorded price date, for alignment checks."""
+    pipeline: list[dict] = []
+    if ticker:
+        pipeline.append({"$match": {"ticker": {"$in": ticker}}})
+    pipeline.append({"$group": {"_id": "$ticker", "start_date": {"$min": "$date"}}})
+
+    cursor = coll.aggregate(pipeline)
+    data = await cursor.to_list(length=None)
+
+    if not data:
+        return pd.DataFrame(columns=["ticker", "start_date"])
+
+    return pd.DataFrame([{"ticker": d["_id"], "start_date": d["start_date"]} for d in data])
+
+
 async def process_chunk(
     coll: AsyncIOMotorCollection, chunk: list[dict], conflict_cols: list[str]
 ):

@@ -140,19 +140,19 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
         conn,
         et.AnalyticData,
         analytics_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.FundamentalData,
         fundamental_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.DynamicData,
         dynamic_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
 
 
@@ -173,19 +173,19 @@ async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
         conn,
         et.AnalyticData,
         analytics_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.FundamentalData,
         fundamental_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.DynamicData,
         dynamic_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
 
 
@@ -198,6 +198,19 @@ async def insert_price_data(conn, raw_df: pd.DataFrame):
 
     await upsert_table(
         conn, et.PriceData, price_df, on_conflict_columns=["stock_id", "trade_date"]
+    )
+
+
+async def insert_indicators_data(conn, indicators_df: pd.DataFrame):
+    """Upserts point-in-time indicators keyed by stock and trading date."""
+    indicators_df = indicators_df.reindex(
+        columns=et.IndicatorsData.__table__.columns.keys()
+    ).copy()
+    await upsert_table(
+        conn,
+        et.IndicatorsData,
+        indicators_df,
+        on_conflict_columns=["stock_id", "indicator_date"],
     )
 
 

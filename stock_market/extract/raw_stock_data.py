@@ -59,14 +59,18 @@ async def process_ticker(ticker: list[str], collection: AsyncIOMotorCollection):
         print(f"Error fetching metadata for {flatten_ticker}: {e}")
 
 
-async def exec_metadata():
+async def exec_metadata(tickers: list[str] | None = None):
     logger.info("Starting metadata ingestion process...")
-    stock_list_path = get_stock_list_path()
-    logger.info(f"Loading stock list from: {stock_list_path}")
 
-    all_tickers = pd.read_json(stock_list_path)
-    all_tickers["Kode Jakarta"] = all_tickers["Kode"] + ".JK"
-    logger.info(f"Total tickers to process: {len(all_tickers)}")
+    if tickers is None:
+        stock_list_path = get_stock_list_path()
+        logger.info(f"Loading stock list from: {stock_list_path}")
+
+        all_tickers = pd.read_json(stock_list_path)
+        all_tickers["Kode Jakarta"] = all_tickers["Kode"] + ".JK"
+        tickers = all_tickers["Kode Jakarta"].tolist()[:500]
+
+    logger.info(f"Total tickers to process: {len(tickers)}")
 
     logger.info("Initializing async database connection...")
     db = get_async_mongodb("raw_stock_data_ingestion")
@@ -80,7 +84,7 @@ async def exec_metadata():
     )
 
     try:
-        batches = split_batch(all_tickers["Kode Jakarta"].tolist()[:500], 50)
+        batches = split_batch(tickers, 50)
         tasks = [partial(process_ticker, batch, collection) for batch in batches]
 
         await aiometer.run_all(tasks, max_at_once=5)

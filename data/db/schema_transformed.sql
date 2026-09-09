@@ -2,7 +2,7 @@
 CREATE SCHEMA IF NOT EXISTS stock_market;
 
 -- 1. Create the parent Metadata table
-CREATE TABLE stock_market.metadata (
+CREATE TABLE IF NOT EXISTS stock_market.metadata (
     stock_id SERIAL PRIMARY KEY,
     ticker VARCHAR UNIQUE NOT NULL,
     symbol VARCHAR NOT NULL,
@@ -21,8 +21,9 @@ CREATE TABLE stock_market.metadata (
 );
 
 -- 2. Create Fundamental Data table
-CREATE TABLE stock_market.fundamental_data (
+CREATE TABLE IF NOT EXISTS stock_market.fundamental_data (
     stock_id INT,
+    created_at TIMESTAMP,
     retrieve_at TIMESTAMP,
     market_cap BIGINT,
     enterprise_value BIGINT,
@@ -40,13 +41,14 @@ CREATE TABLE stock_market.fundamental_data (
     free_cashflow BIGINT,
     operating_cashflow BIGINT,
     return_on_equity NUMERIC,
-    PRIMARY KEY (stock_id, retrieve_at),
+    PRIMARY KEY (stock_id, created_at),
     FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
 );
 
 -- 3. Create Dynamic Data table
-CREATE TABLE stock_market.dynamic_data (
+CREATE TABLE IF NOT EXISTS stock_market.dynamic_data (
     stock_id INT,
+    created_at TIMESTAMP,
     retrieve_at TIMESTAMP,
     current_price NUMERIC,
     previous_close NUMERIC,
@@ -63,13 +65,14 @@ CREATE TABLE stock_market.dynamic_data (
     fifty_day_average NUMERIC,
     two_hundred_day_average NUMERIC,
     market_state VARCHAR,
-    PRIMARY KEY (stock_id, retrieve_at),
+    PRIMARY KEY (stock_id, created_at),
     FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
 );
 
 -- 4. Create Analytic Data table
-CREATE TABLE stock_market.analytic_data (
+CREATE TABLE IF NOT EXISTS stock_market.analytic_data (
     stock_id INT,
+    created_at TIMESTAMP,
     retrieve_at TIMESTAMP,
     target_low_price NUMERIC,
     target_mean_price NUMERIC,
@@ -80,12 +83,12 @@ CREATE TABLE stock_market.analytic_data (
     earnings_start_date TIMESTAMP,
     earnings_end_date TIMESTAMP,
     is_earnings_date_estimate BOOLEAN,
-    PRIMARY KEY (stock_id, retrieve_at),
+    PRIMARY KEY (stock_id, created_at),
     FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
 );
 
 -- 5. Create Price Data table
-CREATE TABLE stock_market.price_data (
+CREATE TABLE IF NOT EXISTS stock_market.price_data (
     stock_id INT,
     trade_date DATE,
     ticker VARCHAR,
@@ -97,5 +100,36 @@ CREATE TABLE stock_market.price_data (
     dividends NUMERIC,
     stock_splits NUMERIC,
     PRIMARY KEY (stock_id, trade_date),
+    FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
+);
+
+-- 6. Point-in-time indicator features used by analytics and production scoring
+CREATE TABLE IF NOT EXISTS stock_market.indicators_data (
+    stock_id INT,
+    indicator_date DATE,
+    ticker VARCHAR,
+    sector VARCHAR,
+    open NUMERIC,
+    high NUMERIC,
+    low NUMERIC,
+    close NUMERIC,
+    volume BIGINT,
+    moving_average_30d NUMERIC,
+    momentum_30d NUMERIC,
+    daily_return NUMERIC,
+    volatility_5d NUMERIC,
+    volatility_20d NUMERIC,
+    average_volume_20d NUMERIC,
+    free_cashflow_to_market_cap NUMERIC,
+    target_price_deviation NUMERIC,
+    recommendation_score NUMERIC,
+    recommendation_score_change NUMERIC,
+    days_until_earnings NUMERIC,
+    earnings_within_7d BOOLEAN,
+    return_on_equity NUMERIC,
+    payout_ratio NUMERIC,
+    total_debt BIGINT,
+    average_analyst_rating VARCHAR,
+    PRIMARY KEY (stock_id, indicator_date),
     FOREIGN KEY (stock_id) REFERENCES stock_market.metadata (stock_id) ON DELETE CASCADE
 );

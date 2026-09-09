@@ -20,16 +20,21 @@ from data.db.statements import fetch_stock_ids, attach_stock_ids, insert_price_d
 from data.db.statements_mongo import fetch_price_raw
 
 
-async def exec_price_data(ticker: list[str] | None = None):
-    """Fetches the price data for all tickers in the database using yfinance and stores it in the database."""
+async def exec_price_data(ticker: list[str] | None = None, start_date: datetime | None = None):
+    """Fetches price data from the raw Mongo store and loads it into the analytics database.
+
+    `start_date` defaults to today, matching the daily incremental transform. Pass an
+    earlier date (e.g. to backfill historical gaps) to pull a wider range from Mongo.
+    """
 
     logger.info("Starting the DB Engine...")
     engine = init_async_db()
     engine_mongo = get_async_mongodb("raw_stock_data_ingestion")
     stock_raw = engine_mongo["raw_price_data"]
 
-    logger.info("Fetching dynamic data!")
-    price_df = await fetch_price_raw(stock_raw, datetime.now(), ticker)
+    query_date = start_date or datetime.now()
+    logger.info(f"Fetching price data since {query_date.date()}!")
+    price_df = await fetch_price_raw(stock_raw, query_date, ticker)
 
     if price_df is None or price_df.empty:
         logger.error(f"No data was found for: {ticker}")
@@ -39,6 +44,10 @@ async def exec_price_data(ticker: list[str] | None = None):
     try:
         async with engine.begin() as conn:
             all_tickers = await fetch_stock_ids(conn, ticker)
+            if not all_tickers:
+                raise RuntimeError(
+                    "No transformed metadata records found. Run metadata ingestion first."
+                )
             price_df = price_df.replace({np.nan: None})
             price_df = attach_stock_ids(price_df, price_df, all_tickers)
 
