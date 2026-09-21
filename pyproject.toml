@@ -2,9 +2,7 @@
 name = "idx-portfolio-pipeline"
 version = "0.1.0"
 description = "ETL pipeline for Indonesian stock portfolio analytics"
-authors = [
-    {name = "Zakihran13",email = "zakisuzaki13@gmail.com"}
-]
+authors = [{ name = "Zakihran13", email = "zakisuzaki13@gmail.com" }]
 requires-python = ">=3.12, <3.15"
 dependencies = [
     "numpy (>=1.26.0,<3.0.0)",
@@ -35,12 +33,15 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.poetry]
-package-mode = false
+packages = [
+    { include = "stock_market" },
+    { include = "data" },
+    { include = "dags" },
+    { include = "utils" },
+]
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^7.3.0"
 
 [dependency-groups]
-dev = [
-    "ipykernel (>=7.3.0,<8.0.0)"
-]
+dev = ["ipykernel (>=7.3.0,<8.0.0)"]

@@ -67,14 +67,18 @@ def _build_history_kwargs(period: str) -> dict[str, Any]:
     return history_kwargs
 
 
-def _fetch_history_blocking(flatten_ticker: str, history_kwargs: dict[str, Any]) -> pd.DataFrame | None:
+def _fetch_history_blocking(
+    flatten_ticker: str, history_kwargs: dict[str, Any]
+) -> pd.DataFrame | None:
     """Executes the blocking yfinance history call outside the event loop."""
 
     tickers = yf.Tickers(flatten_ticker)
     return tickers.history(**history_kwargs)
 
 
-async def process_historical_price_data(collection: AsyncIOMotorCollection, ticker: list[str], period: str):
+async def process_historical_price_data(
+    collection: AsyncIOMotorCollection, ticker: list[str], period: str
+):
     """Fetches historical price data for a ticker batch using yfinance."""
 
     flatten_ticker = " ".join(ticker)
@@ -114,8 +118,9 @@ async def process_historical_price_data(collection: AsyncIOMotorCollection, tick
         )
 
 
-
-async def exec_historical_price_data(tickers: list[str] | None = None, period: str = YF_HISTORICAL_PERIOD) -> None:
+async def exec_historical_price_data(
+    tickers: list[str] | None = None, period: str = YF_HISTORICAL_PERIOD
+) -> None:
     """Fetches historical price data for all tickers and stores it in the database."""
 
     logger.info("Starting historical price ingestion")
@@ -130,7 +135,6 @@ async def exec_historical_price_data(tickers: list[str] | None = None, period: s
         unique=1,
         name="ticker_date_unique",
     )
-
 
     try:
         if not tickers:
@@ -153,10 +157,7 @@ async def exec_historical_price_data(tickers: list[str] | None = None, period: s
                 for batch in batches
             ]
 
-            await aiometer.run_all(
-                tasks,
-                max_at_once=5
-            )
+            await aiometer.run_all(tasks, max_at_once=5)
 
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.warning("Ctrl+C detected. Cancelling outstanding fetch tasks...")
