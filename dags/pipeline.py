@@ -80,7 +80,7 @@ def daily_raw_ingestion():
     price_data = get_price_raw()
 
     # Set the bitshift dependencies so mark_raw_done waits for both
-    [stock_data, price_data] >> mark_raw_done()
+    [stock_data, price_data] >> mark_raw_done() # type: ignore
 
 
 @dag(
@@ -146,7 +146,7 @@ def historical_data_transform():
     stock_data = historical_stock_transform(start_date)
     price_data = historical_price_transform(start_date)
     # metadata >> [stock_data, price_data]
-    [stock_data, price_data] >> historical_indicators_transform(start_date)
+    [stock_data, price_data] >> historical_indicators_transform(start_date) # type: ignore
 
 
 # =========================== daily data flow ==================================================
@@ -209,7 +209,7 @@ def daily_data_transform():
 
     stock_data = daily_stock_transform()
     price_data = daily_price_transform()
-    [stock_data, price_data] >> daily_indicators_transform()
+    [stock_data, price_data] >> daily_indicators_transform() # type: ignore
 
 
 daily_pipeline = daily_raw_ingestion()

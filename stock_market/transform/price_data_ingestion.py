@@ -62,4 +62,4 @@ async def exec_price_data(ticker: list[str] | None = None, start_date: datetime 
 
 
 if __name__ == "__main__":
-    asyncio.run(exec_price_data())
+    asyncio.run(exec_price_data(start_date=datetime(1990,1,1)))
