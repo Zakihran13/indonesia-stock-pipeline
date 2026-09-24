@@ -20,16 +20,38 @@ def utc_now_naive() -> pd.Timestamp:
 
 
 def metadata_separation(df: pd.DataFrame):
+    # METADATA
     metadata_df = (
-        df.reindex(columns=et.StockMetadata.__table__.columns.keys())
+        df.assign(created_at=df["market_date"])
+        .reindex(columns=et.StockMetadata.__table__.columns.keys())
         .copy()
         .drop(columns=["stock_id"], errors="ignore")
     )
-    analytics_df = df.reindex(columns=et.AnalyticData.__table__.columns.keys()).copy()
-    fundamental_df = df.reindex(
-        columns=et.FundamentalData.__table__.columns.keys()
-    ).copy()
-    dynamic_df = df.reindex(columns=et.DynamicData.__table__.columns.keys()).copy()
+    metadata_df["created_at"] = pd.to_datetime(metadata_df["created_at"]).dt.floor("D")
+
+    # ANALYTICS
+    analytics_df = (
+        df.assign(created_at=df["market_date"])
+        .reindex(columns=et.AnalyticData.__table__.columns.keys())
+        .copy()
+    )
+    analytics_df["created_at"] = pd.to_datetime(analytics_df["created_at"]).dt.floor("D")
+
+    # FUNDAMENTAL
+    fundamental_df = (
+        df.assign(created_at=df["market_date"])
+        .reindex(columns=et.FundamentalData.__table__.columns.keys())
+        .copy()
+    )
+    fundamental_df["created_at"] = pd.to_datetime(fundamental_df["created_at"]).dt.floor("D")
+
+    # DYNAMIC
+    dynamic_df = (
+        df.assign(created_at=df["market_date"])
+        .reindex(columns=et.DynamicData.__table__.columns.keys())
+        .copy()
+    )
+    dynamic_df["created_at"] = pd.to_datetime(dynamic_df["created_at"]).dt.floor("D")
 
     return metadata_df, analytics_df, fundamental_df, dynamic_df
 
@@ -118,7 +140,7 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
         renamed_df
     )
     now_utc = utc_now_naive().date()
-    metadata_df[["created_at", "updated_at"]] = now_utc
+    metadata_df[["updated_at"]] = now_utc
     analytics_df[["retrieve_at"]] = now_utc
     fundamental_df[["retrieve_at"]] = now_utc
     dynamic_df[["retrieve_at"]] = now_utc
@@ -140,19 +162,19 @@ async def insert_metadata(conn, raw_df: pd.DataFrame):
         conn,
         et.AnalyticData,
         analytics_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.FundamentalData,
         fundamental_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.DynamicData,
         dynamic_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
 
 
@@ -173,19 +195,19 @@ async def insert_dynamic_data(conn, raw_df: pd.DataFrame):
         conn,
         et.AnalyticData,
         analytics_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.FundamentalData,
         fundamental_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
     await upsert_table(
         conn,
         et.DynamicData,
         dynamic_df,
-        on_conflict_columns=["stock_id", "retrieve_at"],
+        on_conflict_columns=["stock_id", "created_at"],
     )
 
 
@@ -198,6 +220,19 @@ async def insert_price_data(conn, raw_df: pd.DataFrame):
 
     await upsert_table(
         conn, et.PriceData, price_df, on_conflict_columns=["stock_id", "trade_date"]
+    )
+
+
+async def insert_indicators_data(conn, indicators_df: pd.DataFrame):
+    """Upserts point-in-time indicators keyed by stock and trading date."""
+    indicators_df = indicators_df.reindex(
+        columns=et.IndicatorsData.__table__.columns.keys()
+    ).copy()
+    await upsert_table(
+        conn,
+        et.IndicatorsData,
+        indicators_df,
+        on_conflict_columns=["stock_id", "indicator_date"],
     )
 
 

@@ -44,6 +44,7 @@ async def ingest_metadata(ticker: list[str] | None = None):
             # all_tickers = await fetch_stock_ids(conn, ticker)
             metadata_df = metadata_df.replace({np.nan: None})
             metadata_df = metadata_df.drop_duplicates(subset=["ticker"], keep="last")
+            metadata_df = metadata_df.dropna(subset=["symbol"])
 
             await insert_metadata(conn, metadata_df)
     finally:

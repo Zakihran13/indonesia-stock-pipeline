@@ -17,8 +17,47 @@ async def fetch_stock_ids(coll: AsyncIOMotorCollection) -> List[str]:
     return [n["ticker"] for n in data if "ticker"]
 
 
+async def fetch_metadata_ticker_dates(
+    coll: AsyncIOMotorCollection, ticker: List[str] | None = None
+) -> pd.DataFrame:
+    """Fetches ticker/market_date pairs only, for gap/staleness detection."""
+    params: dict[str, Any] = {}
+    if ticker:
+        params["ticker"] = {"$in": ticker}
+
+    cursor = coll.find(params, {"ticker": 1, "market_date": 1, "_id": 0})
+    data = await cursor.to_list(length=None)
+
+    return (
+        pd.DataFrame(data) if data else pd.DataFrame(columns=["ticker", "market_date"])
+    )
+
+
+async def fetch_price_start_dates(
+    coll: AsyncIOMotorCollection, ticker: List[str] | None = None
+) -> pd.DataFrame:
+    """Fetches each ticker's earliest recorded price date, for alignment checks."""
+    pipeline: list[dict] = []
+    if ticker:
+        pipeline.append({"$match": {"ticker": {"$in": ticker}}})
+    pipeline.append({"$group": {"_id": "$ticker", "start_date": {"$min": "$date"}}})
+
+    cursor = coll.aggregate(pipeline)
+    data = await cursor.to_list(length=None)
+
+    if not data:
+        return pd.DataFrame(columns=["ticker", "start_date"])
+
+    return pd.DataFrame(
+        [{"ticker": d["_id"], "start_date": d["start_date"]} for d in data]
+    )
+
+
 async def process_chunk(
-    coll: AsyncIOMotorCollection, chunk: list[dict], conflict_cols: list[str]
+    coll: AsyncIOMotorCollection,
+    chunk: list[dict],
+    conflict_cols: list[str],
+    semaphore: asyncio.Semaphore,
 ):
     batch_operations = [
         UpdateOne(
@@ -27,11 +66,17 @@ async def process_chunk(
         for record in chunk
     ]
 
-    return await coll.bulk_write(batch_operations, ordered=False)
+    # Bound concurrency so we don't hold every chunk's BSON payload in memory at once.
+    async with semaphore:
+        return await coll.bulk_write(batch_operations, ordered=False)
 
 
 async def upsert_data(
-    coll: AsyncIOMotorCollection, data: pd.DataFrame, conflict_cols: list[str]
+    coll: AsyncIOMotorCollection,
+    data: pd.DataFrame,
+    conflict_cols: list[str],
+    batch_size: int = 2_000,
+    max_concurrency: int = 4,
 ):
     if not conflict_cols:
         raise ValueError("conflict_cols cannot be empty.")
@@ -42,9 +87,10 @@ async def upsert_data(
 
     logger.info(f"inserting data for: **{' '.join(pd.unique(data["ticker"]))}**")
     records = data.to_dict("records")
-    batch_data = split_batch(records, 10_000)
+    batch_data = split_batch(records, batch_size)
+    semaphore = asyncio.Semaphore(max_concurrency)
     operation_tasks = [
-        process_chunk(coll, chunk, conflict_cols) for chunk in batch_data
+        process_chunk(coll, chunk, conflict_cols, semaphore) for chunk in batch_data
     ]
 
     if operation_tasks:
