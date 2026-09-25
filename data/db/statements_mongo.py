@@ -143,3 +143,32 @@ async def fetch_price_raw(
     if data:
         return pd.DataFrame(data)
     return
+
+
+async def fetch_partial_price_raw(
+    coll: AsyncIOMotorCollection,
+    current_date: datetime,
+    tickers: list[str] | None = None,
+    batch_size: int = 25_000,
+):
+    params: dict[str, Any] = {
+        "date": {
+            "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        }
+    }
+
+    if tickers:
+        params["ticker"] = {"$in": tickers}
+
+    cursor = coll.find(params)
+
+    batch_data = []
+    async for doc in cursor:
+        batch_data.append(doc)
+
+        if len(batch_data) >= batch_size:
+            yield pd.DataFrame(batch_data)
+            batch_data = []
+
+    if batch_data:
+        yield pd.DataFrame(batch_data)
