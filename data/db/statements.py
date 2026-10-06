@@ -2,14 +2,19 @@ from utils.helper import snake_case_columns, dataframe_to_records
 import data.db.entities_transformed as et
 from decimal import Decimal, InvalidOperation
 import math
+from typing import List, Dict, Any, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import DateTime
-from sqlalchemy.sql.sqltypes import BigInteger, Integer, Numeric, String, Text
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.sql.elements import ColumnElement
 import pandas as pd
+from datetime import datetime, timedelta
+from loguru import logger
 
+T = TypeVar("T", bound=DeclarativeBase)
 MAX_BIND_PARAMS_PER_STATEMENT = 30000
 
 
@@ -35,7 +40,9 @@ def metadata_separation(df: pd.DataFrame):
         .reindex(columns=et.AnalyticData.__table__.columns.keys())
         .copy()
     )
-    analytics_df["created_at"] = pd.to_datetime(analytics_df["created_at"]).dt.floor("D")
+    analytics_df["created_at"] = pd.to_datetime(analytics_df["created_at"]).dt.floor(
+        "D"
+    )
 
     # FUNDAMENTAL
     fundamental_df = (
@@ -43,7 +50,9 @@ def metadata_separation(df: pd.DataFrame):
         .reindex(columns=et.FundamentalData.__table__.columns.keys())
         .copy()
     )
-    fundamental_df["created_at"] = pd.to_datetime(fundamental_df["created_at"]).dt.floor("D")
+    fundamental_df["created_at"] = pd.to_datetime(
+        fundamental_df["created_at"]
+    ).dt.floor("D")
 
     # DYNAMIC
     dynamic_df = (
@@ -104,7 +113,7 @@ async def upsert_table(
 
 async def fetch_stock_ids(
     conn: AsyncConnection, tickers: list[str] | None = None
-) -> dict[str, int]:
+) -> list[dict]:
     if not tickers:
         stmt = select(et.StockMetadata.ticker, et.StockMetadata.stock_id)
     else:
@@ -113,12 +122,16 @@ async def fetch_stock_ids(
         )
 
     result = await conn.execute(stmt)
-    return {ticker: stock_id for ticker, stock_id in result.all()}
+    return [dict(row) for row in result.mappings()]
 
 
 def attach_stock_ids(
-    child_df: pd.DataFrame, metadata_df: pd.DataFrame, stock_ids: dict[str, int]
+    child_df: pd.DataFrame, metadata_df: pd.DataFrame, stock_ids: Any
 ) -> pd.DataFrame:
+
+    if isinstance(stock_ids, list):
+        stock_ids = {row["ticker"]: row["stock_id"] for row in stock_ids}
+
     child_df = child_df.copy()
     child_df["stock_id"] = metadata_df["ticker"].map(stock_ids)
     child_df = child_df.dropna(subset=["stock_id"])
@@ -285,3 +298,26 @@ async def get_fundamental_data(conn, tickers: list[str] | None = None) -> pd.Dat
     rows = result.fetchall()
     df = pd.DataFrame(rows, columns=result.keys())
     return df
+
+
+async def fetch_frame(
+    conn: AsyncConnection,
+    model,
+    created_at_col: ColumnElement,
+    stock_ids: List[int] | None = None,
+    start_date: datetime | None = None,
+) -> pd.DataFrame:
+
+    if not start_date:
+        logger.error("no start date found!")
+        return pd.DataFrame([])
+
+    if stock_ids:
+        stmt = select(model).where(
+            model.stock_id.in_(stock_ids), created_at_col >= start_date
+        )
+    else:
+        stmt = select(model).where(created_at_col >= start_date)
+
+    result = await conn.execute(stmt)
+    return pd.DataFrame(result.mappings().all())

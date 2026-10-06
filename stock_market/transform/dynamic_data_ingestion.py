@@ -24,7 +24,9 @@ from data.db.client import init_async_db, get_async_mongodb
 from data.db.statements_mongo import fetch_dynamic_raw
 
 
-async def exec_dynamic_data(ticker: list[str] | None = None, start_date: datetime | None = None):
+async def exec_dynamic_data(
+    ticker: list[str] | None = None, start_date: datetime | None = None
+):
     """Fetches dynamic snapshot data from the raw Mongo store and loads it into the analytics database.
 
     `start_date` defaults to today, matching the daily incremental transform. Pass an
@@ -38,20 +40,20 @@ async def exec_dynamic_data(ticker: list[str] | None = None, start_date: datetim
 
     query_date = start_date or datetime.now()
     logger.info(f"Fetching dynamic data since {query_date.date()}!")
-    metadata_df = await fetch_dynamic_raw(stock_raw, query_date, ticker)
 
-    if metadata_df is None or metadata_df.empty:
-        logger.error(f"No data was found for: {ticker}")
-        return
-
-    # store data
     try:
-        async with engine.begin() as conn:
+        async with engine.connect() as conn:
             all_tickers = await fetch_stock_ids(conn, ticker)
-            if not all_tickers:
-                raise RuntimeError(
-                    "No transformed metadata records found. Run metadata ingestion first."
-                )
+        if not all_tickers:
+            raise RuntimeError(
+                "No transformed metadata records found. Run metadata ingestion first."
+            )
+
+        # Consume and insert one batch at a time so we never hold the full
+        # backfill range (which embeds the full yfinance info payload) in memory.
+        found_any = False
+        async for metadata_df in fetch_dynamic_raw(stock_raw, query_date, ticker):
+            found_any = True
             metadata_df = metadata_df.replace({np.nan: None})
             metadata_df = attach_stock_ids(metadata_df, metadata_df, all_tickers)
 
@@ -62,7 +64,11 @@ async def exec_dynamic_data(ticker: list[str] | None = None, start_date: datetim
                 subset=["stock_id", "created_at"], keep="last"
             )
 
-            await insert_dynamic_data(conn, metadata_df)
+            async with engine.begin() as conn:
+                await insert_dynamic_data(conn, metadata_df)
+
+        if not found_any:
+            logger.error(f"No data was found for: {ticker}")
     finally:
         await engine.dispose()
 

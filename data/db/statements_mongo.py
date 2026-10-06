@@ -105,7 +105,15 @@ async def fetch_dynamic_raw(
     coll: AsyncIOMotorCollection,
     current_date: datetime,
     ticker: List[str] | None = None,
-) -> pd.DataFrame | None:
+    batch_size: int = 2_000,
+):
+    """Streams raw metadata snapshots in batches.
+
+    Documents here embed the full yfinance `.info` payload, so loading a
+    multi-week/ticker range with `to_list(length=None)` can pull gigabytes
+    into memory at once. Yielding fixed-size batches keeps memory bounded
+    regardless of the requested date range.
+    """
     params: dict[str, Any] = {
         "created_at": {
             "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -116,11 +124,17 @@ async def fetch_dynamic_raw(
         params["ticker"] = {"$in": ticker}
 
     cursor = coll.find(params)
-    data = await cursor.to_list(length=None)
 
-    if data:
-        return pd.DataFrame(data)
-    return
+    batch_data = []
+    async for doc in cursor:
+        batch_data.append(doc)
+
+        if len(batch_data) >= batch_size:
+            yield pd.DataFrame(batch_data)
+            batch_data = []
+
+    if batch_data:
+        yield pd.DataFrame(batch_data)
 
 
 async def fetch_price_raw(
@@ -143,3 +157,32 @@ async def fetch_price_raw(
     if data:
         return pd.DataFrame(data)
     return
+
+
+async def fetch_partial_price_raw(
+    coll: AsyncIOMotorCollection,
+    current_date: datetime,
+    tickers: list[str] | None = None,
+    batch_size: int = 25_000,
+):
+    params: dict[str, Any] = {
+        "date": {
+            "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        }
+    }
+
+    if tickers:
+        params["ticker"] = {"$in": tickers}
+
+    cursor = coll.find(params)
+
+    batch_data = []
+    async for doc in cursor:
+        batch_data.append(doc)
+
+        if len(batch_data) >= batch_size:
+            yield pd.DataFrame(batch_data)
+            batch_data = []
+
+    if batch_data:
+        yield pd.DataFrame(batch_data)
