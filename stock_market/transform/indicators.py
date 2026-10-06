@@ -8,6 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from loguru import logger
 from sqlalchemy import select
+from typing import List, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -17,7 +18,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 from data.db import entities_transformed as et
 from data.db.client import init_async_db
-from data.db.statements import insert_indicators_data
+from data.db.statements import insert_indicators_data, fetch_frame
 
 RECOMMENDATION_SCORES = {
     "strong buy": 2,
@@ -27,11 +28,6 @@ RECOMMENDATION_SCORES = {
     "sell": -1,
     "strong sell": -2,
 }
-
-
-async def _fetch_frame(conn, model) -> pd.DataFrame:
-    result = await conn.execute(select(model))
-    return pd.DataFrame(result.mappings().all())
 
 
 def _asof_merge(
@@ -87,10 +83,10 @@ def build_indicator_frame(
     indicators = prices.copy()
     indicators["indicator_date"] = pd.to_datetime(indicators["trade_date"])
     indicators = indicators.sort_values(["stock_id", "indicator_date"])
-    indicators = _asof_merge(indicators, metadata, "updated_at")
-    indicators = _asof_merge(indicators, fundamentals, "retrieve_at")
-    indicators = _asof_merge(indicators, dynamic, "retrieve_at")
-    indicators = _asof_merge(indicators, analytics, "retrieve_at")
+    indicators = _asof_merge(indicators, metadata, "created_at")
+    indicators = _asof_merge(indicators, fundamentals, "created_at")
+    indicators = _asof_merge(indicators, dynamic, "created_at")
+    indicators = _asof_merge(indicators, analytics, "created_at")
 
     for column in (
         "sector",
@@ -165,18 +161,36 @@ def build_indicator_frame(
     return indicators.reindex(columns=output_columns).replace({np.nan: None})
 
 
-async def materialize_indicators(start_date: datetime | None = None) -> int:
+async def materialize_indicators(
+    stock_ids: List[int] | None = None, start_date: datetime | None = None
+) -> int | None:
     """Build and upsert indicators, optionally starting from a historical date."""
+
+    if not start_date:
+        start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
     engine = init_async_db()
     try:
         async with engine.begin() as conn:
+            models = [
+                (et.PriceData, et.PriceData.trade_date),
+                (et.StockMetadata, et.StockMetadata.created_at),
+                (et.FundamentalData, et.FundamentalData.created_at),
+                (et.DynamicData, et.DynamicData.created_at),
+                (et.AnalyticData, et.AnalyticData.created_at),
+            ]
+
             frames = await asyncio.gather(
-                _fetch_frame(conn, et.PriceData),
-                _fetch_frame(conn, et.StockMetadata),
-                _fetch_frame(conn, et.FundamentalData),
-                _fetch_frame(conn, et.DynamicData),
-                _fetch_frame(conn, et.AnalyticData),
+                *(
+                    fetch_frame(conn, model, date_col, stock_ids, start_date)
+                    for model, date_col in models
+                )
             )
+
+            if all(df.empty for df in frames):
+                logger.error(f"NO DATA IS FOUND FOR: **{start_date}**")
+                return
+
             indicator_frame = build_indicator_frame(*frames, start_date=start_date)
             await insert_indicators_data(conn, indicator_frame)
             logger.info("Materialized {} indicator rows", len(indicator_frame))
@@ -186,4 +200,11 @@ async def materialize_indicators(start_date: datetime | None = None) -> int:
 
 
 if __name__ == "__main__":
-    asyncio.run(materialize_indicators())
+    from datetime import timedelta
+
+    asyncio.run(
+        materialize_indicators(
+            stock_ids=[1, 2, 3, 4, 5],
+            start_date=datetime(2026, 9, 18) - timedelta(days=60),
+        )
+    )

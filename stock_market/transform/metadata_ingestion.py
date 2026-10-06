@@ -30,23 +30,23 @@ async def ingest_metadata(ticker: list[str] | None = None):
     stock_raw = engine_mongo["raw_stock_data"]
 
     logger.info("Fetching dynamic data!")
-    metadata_df = await fetch_dynamic_raw(
-        stock_raw, datetime.now() - timedelta(days=60), ticker
-    )
-
-    if metadata_df is None or metadata_df.empty:
-        logger.error(f"No data was found for: {ticker}")
-        return
 
     # store data
     try:
-        async with engine.begin() as conn:
-            # all_tickers = await fetch_stock_ids(conn, ticker)
+        found_any = False
+        async for metadata_df in fetch_dynamic_raw(
+            stock_raw, datetime.now() - timedelta(days=60), ticker
+        ):
+            found_any = True
             metadata_df = metadata_df.replace({np.nan: None})
             metadata_df = metadata_df.drop_duplicates(subset=["ticker"], keep="last")
             metadata_df = metadata_df.dropna(subset=["symbol"])
 
-            await insert_metadata(conn, metadata_df)
+            async with engine.begin() as conn:
+                await insert_metadata(conn, metadata_df)
+
+        if not found_any:
+            logger.error(f"No data was found for: {ticker}")
     finally:
         await engine.dispose()
 
