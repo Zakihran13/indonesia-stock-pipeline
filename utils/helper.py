@@ -1,6 +1,8 @@
-from typing import List, Any
+from typing import Any, Callable, List, TypeVar
 import re
 import os
+import random
+import threading
 import asyncio
 import time
 import math
@@ -14,9 +16,191 @@ from sqlalchemy import String, Text, Numeric, Integer, BigInteger, DateTime, Dat
 YF_GLOBAL_MIN_INTERVAL_SECONDS = float(
     os.getenv("YF_GLOBAL_MIN_INTERVAL_SECONDS", "1.5")
 )
+YF_BACKOFF_MAX_RETRIES = int(os.getenv("YF_BACKOFF_MAX_RETRIES", "5"))
+YF_BACKOFF_BASE_SECONDS = float(os.getenv("YF_BACKOFF_BASE_SECONDS", "5"))
+YF_BACKOFF_MAX_SECONDS = float(os.getenv("YF_BACKOFF_MAX_SECONDS", "120"))
 
-_yf_rate_limit_lock = asyncio.Lock()
-_yf_last_request_ts = 0.0
+# Substrings identifying Yahoo throttling / transient upstream failures.
+# yfinance surfaces these inconsistently across versions (YFRateLimitError,
+# HTTP errors, or plain text messages), so message matching is the fallback.
+_TRANSIENT_YF_ERROR_NEEDLES = (
+    "429",
+    "too many requests",
+    "rate limit",
+    "403",
+    "forbidden",
+    "502",
+    "503",
+    "504",
+    "service unavailable",
+    "gateway",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "temporarily",
+    "max retries exceeded",
+)
+
+T = TypeVar("T")
+
+
+class GlobalYfRateLimiter:
+    """Process-wide pacing for outbound yfinance requests.
+
+    Every caller - asyncio tasks and ``asyncio.to_thread`` workers alike -
+    reserves the next request slot from a single shared timestamp under a
+    thread lock, so concurrent batches are spaced by at least ``min_interval``
+    seconds no matter which concurrency primitive runs them. Slots are
+    reserved ahead of time, which keeps the spacing even and prevents
+    concurrent workers from collapsing into a burst.
+
+    The interval is adaptive: a rate-limit response multiplies it
+    (``penalize``) and every successful request decays it back toward the base
+    value (``reward``), so the whole flow slows down while Yahoo is
+    throttling instead of hammering it harder.
+    """
+
+    def __init__(
+        self,
+        min_interval: float,
+        penalty_factor: float = 2.0,
+        ceiling: float = 60.0,
+    ):
+        self._base_interval = max(0.0, float(min_interval))
+        self._interval = self._base_interval
+        self._penalty_factor = max(1.0, float(penalty_factor))
+        self._ceiling = max(self._base_interval, float(ceiling))
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    @property
+    def interval(self) -> float:
+        """Currently effective per-request interval in seconds."""
+        with self._lock:
+            return self._interval
+
+    @property
+    def base_interval(self) -> float:
+        return self._base_interval
+
+    def _reserve_slot(self) -> float:
+        """Claims the next request slot and returns how long the caller waits."""
+        with self._lock:
+            now = time.monotonic()
+            slot_start = max(now, self._next_slot)
+            self._next_slot = slot_start + self._interval
+            return slot_start - now
+
+    def acquire_blocking(self) -> float:
+        """Waits for this caller's slot. Safe to call from worker threads."""
+        wait = self._reserve_slot()
+        if wait > 0:
+            time.sleep(wait)
+        return wait
+
+    async def acquire(self) -> float:
+        """Async variant of :meth:`acquire_blocking`."""
+        wait = self._reserve_slot()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        return wait
+
+    def penalize(self) -> float:
+        """Escalates pacing after a rate-limit response; returns new interval."""
+        with self._lock:
+            self._interval = min(
+                self._ceiling,
+                max(
+                    self._interval * self._penalty_factor,
+                    self._base_interval * self._penalty_factor,
+                ),
+            )
+            return self._interval
+
+    def reward(self) -> float:
+        """Decays the interval back toward the base after a successful request."""
+        with self._lock:
+            if self._interval > self._base_interval:
+                self._interval = max(
+                    self._base_interval, self._interval * 0.9
+                )
+            return self._interval
+
+
+# Shared by every flow in this process; import and call
+# `await wait_for_global_yf_rate_limit()` (async) or
+# `yf_rate_limiter.acquire_blocking()` (threads) before each yfinance request.
+yf_rate_limiter = GlobalYfRateLimiter(YF_GLOBAL_MIN_INTERVAL_SECONDS)
+
+
+def is_transient_yf_error(error: BaseException) -> bool:
+    """True for Yahoo rate limiting and other transient transport failures."""
+
+    try:
+        from yfinance.exceptions import YFRateLimitError
+
+        if isinstance(error, YFRateLimitError):
+            return True
+    except Exception:
+        pass
+
+    message = str(error).lower()
+    return any(needle in message for needle in _TRANSIENT_YF_ERROR_NEEDLES)
+
+
+def compute_backoff_delay(
+    attempt: int,
+    base: float = YF_BACKOFF_BASE_SECONDS,
+    maximum: float = YF_BACKOFF_MAX_SECONDS,
+    jitter: float = 0.2,
+) -> float:
+    """Exponential backoff with jitter: ``base * 2**attempt``, capped at ``maximum``."""
+
+    delay = min(maximum, base * (2 ** max(0, attempt)))
+    if jitter:
+        delay *= random.uniform(1 - jitter, 1 + jitter)
+    return max(0.0, min(maximum, delay))
+
+
+def with_yf_backoff(
+    fn: Callable[[], T],
+    description: str = "yfinance request",
+    max_retries: int | None = None,
+) -> T:
+    """Runs a blocking yfinance call, retrying transient failures with backoff.
+
+    Each retry sleeps ``base * 2**attempt`` (jittered) and escalates the global
+    rate limiter, so *all* workers slow down while Yahoo is throttling us.
+    Non-transient errors are raised immediately; the last transient error is
+    re-raised once retries are exhausted.
+    """
+
+    retries = YF_BACKOFF_MAX_RETRIES if max_retries is None else max_retries
+    attempt = 0
+
+    while True:
+        try:
+            return fn()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not is_transient_yf_error(error) or attempt >= retries:
+                raise
+
+            delay = compute_backoff_delay(attempt)
+            new_interval = yf_rate_limiter.penalize()
+            logger.warning(
+                "{} hit a transient error ({}); backing off {:.1f}s "
+                "(retry {}/{}), global yfinance interval now {:.1f}s",
+                description,
+                error,
+                delay,
+                attempt + 1,
+                retries,
+                new_interval,
+            )
+            time.sleep(delay)
+            attempt += 1
 
 
 def split_batch(data: List[Any], batch_size: int) -> List[List[Any]]:
@@ -51,16 +235,7 @@ def snake_case_columns(df: pd.DataFrame) -> pd.DataFrame:
 async def wait_for_global_yf_rate_limit() -> None:
     """Enforces a process-wide minimum interval between yfinance requests."""
 
-    global _yf_last_request_ts
-
-    async with _yf_rate_limit_lock:
-        now = time.monotonic()
-        elapsed = now - _yf_last_request_ts
-
-        if elapsed < YF_GLOBAL_MIN_INTERVAL_SECONDS:
-            await asyncio.sleep(YF_GLOBAL_MIN_INTERVAL_SECONDS - elapsed)
-
-        _yf_last_request_ts = time.monotonic()
+    await yf_rate_limiter.acquire()
 
 
 async def cancel_pending_tasks(tasks: list[asyncio.Task]) -> None:

@@ -30,6 +30,35 @@ from data.db.client import get_async_mongodb
 from stock_market.config import get_stock_list_path
 
 
+def _resolve_market_date(metadata_df: pd.DataFrame) -> pd.Series:
+    """Derives the snapshot key used by Mongo's (ticker, market_date) unique index.
+
+    yfinance omits `regular_market_time` for suspended/delisted tickers, which would
+    otherwise store a NULL market_date. `market_date` becomes `created_at` during the
+    transform, where it is a NOT NULL primary key, so a single NULL aborts the whole
+    load. Fall back to the extraction date instead of writing an unusable snapshot.
+    """
+    raw = (
+        metadata_df["regular_market_time"]
+        if "regular_market_time" in metadata_df.columns
+        else pd.Series(pd.NaT, index=metadata_df.index)
+    )
+    market_time = pd.to_datetime(raw, unit="s", utc=True)
+    market_date = market_time.dt.normalize()
+
+    missing = market_time.isna()
+    if missing.any():
+        logger.warning(
+            f"regular_market_time missing for {int(missing.sum())} ticker(s): "
+            f"{', '.join(metadata_df.loc[missing, 'ticker'])}. "
+            "Falling back to the extraction date for market_date."
+        )
+        fallback = pd.to_datetime(metadata_df["created_at"], utc=True).dt.normalize()
+        market_date = market_date.where(~missing, fallback)
+
+    return market_date
+
+
 async def process_ticker(ticker: list[str], collection: AsyncIOMotorCollection):
     """fetches the metadata for a given ticker using yfinance and returns a DataFrame."""
 
@@ -47,10 +76,7 @@ async def process_ticker(ticker: list[str], collection: AsyncIOMotorCollection):
         if metadata_list:
             metadata_df = pd.DataFrame(metadata_list)
             metadata_df = snake_case_columns(metadata_df)
-            metadata_df["market_date"] = (
-                pd.to_datetime(metadata_df["regular_market_time"], unit="s", utc=True)
-                    .dt.normalize()
-            )
+            metadata_df["market_date"] = _resolve_market_date(metadata_df)
             metadata_df = metadata_df.replace({np.nan: None})
 
             await upsert_data(collection, metadata_df, ["ticker", "market_date"])

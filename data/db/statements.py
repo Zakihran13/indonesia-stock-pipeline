@@ -81,8 +81,14 @@ async def upsert_table(
     table,
     df: pd.DataFrame,
     on_conflict_columns: list[str] | None = None,
+    update_columns: list[str] | None = None,
 ):
-    """Upserts data into the specified table."""
+    """Upserts data into the specified table.
+
+    `update_columns` narrows the ON CONFLICT SET clause to just those columns,
+    so a targeted patch (e.g. the cashflow fields) updates an existing row
+    without overwriting its other columns with NULLs from this load.
+    """
     if df.empty:
         return
 
@@ -99,12 +105,17 @@ async def upsert_table(
     for record_batch in _iter_record_batches(records, len(table.__table__.columns)):
         stmt = insert(table).values(record_batch)
 
+        if update_columns is None:
+            set_names = [c.name for c in stmt.excluded]
+        else:
+            set_names = update_columns
+
         stmt = stmt.on_conflict_do_update(
             index_elements=conflict_columns,
             set_={
-                c.name: getattr(stmt.excluded, c.name)
-                for c in stmt.excluded
-                if c.name not in conflict_columns and c.name not in primary_key_columns
+                name: getattr(stmt.excluded, name)
+                for name in set_names
+                if name not in conflict_columns and name not in primary_key_columns
             },
         )
 
@@ -140,6 +151,35 @@ def attach_stock_ids(
         child_df["stock_id"] = child_df["stock_id"].astype(int)
 
     return child_df
+
+
+def drop_missing_market_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """Drops snapshots that cannot be keyed.
+
+    `metadata_separation()` rebuilds `created_at` from `market_date`, and
+    `created_at` is part of a NOT NULL primary key in every snapshot table. A row
+    without a market_date therefore fails the whole INSERT (rolling back the batch
+    and aborting the run) instead of being skipped, so filter it out up front.
+    Legacy raw documents written before the extract-side fallback still carry NULL
+    market_date values, so this guard stays reachable on backfills.
+    """
+    if df.empty or "market_date" not in df.columns:
+        return df
+
+    missing = df["market_date"].isna()
+    if not missing.any():
+        return df
+
+    detail = ""
+    if "ticker" in df.columns:
+        tickers = sorted(df.loc[missing, "ticker"].dropna().unique())
+        if tickers:
+            detail = f" for: {', '.join(tickers)}"
+
+    logger.warning(
+        f"Dropping {int(missing.sum())} snapshot(s) without market_date{detail}"
+    )
+    return df.loc[~missing].copy()
 
 
 async def insert_metadata(conn, raw_df: pd.DataFrame):
@@ -264,6 +304,46 @@ async def insert_shares_data(conn, raw_df: pd.DataFrame):
         et.FundamentalData,
         shares_df,
         on_conflict_columns=["stock_id", "retrieve_at"],
+    )
+
+
+async def insert_cashflow_data(conn, raw_df: pd.DataFrame):
+    """Patches free cash flow periods into the fundamental_data table.
+
+    Rows arrive with `period_end` (the statement period end) and are keyed as
+    `created_at = period_end`, one fundamental snapshot per fiscal period. On
+    conflict only `free_cashflow`, `operating_cashflow` and `retrieve_at` are
+    updated, so same-day `.info` snapshots written by `insert_metadata()` /
+    `insert_dynamic_data()` keep their valuation columns (market_cap, ratios).
+    """
+
+    if raw_df.empty or "period_end" not in raw_df.columns:
+        return
+
+    cashflow_df = raw_df.rename(columns={"period_end": "created_at"})
+
+    created_at = pd.to_datetime(cashflow_df["created_at"])
+    if getattr(created_at.dtype, "tz", None) is not None:
+        created_at = created_at.dt.tz_convert("UTC").dt.tz_localize(None)
+    cashflow_df["created_at"] = created_at.dt.normalize()
+
+    cashflow_df = (
+        cashflow_df.dropna(subset=["stock_id", "created_at"])
+        .drop_duplicates(subset=["stock_id", "created_at"], keep="last")
+        .copy()
+    )
+    cashflow_df["retrieve_at"] = utc_now_naive()
+
+    cashflow_df = cashflow_df.reindex(
+        columns=et.FundamentalData.__table__.columns.keys()
+    ).copy()
+
+    await upsert_table(
+        conn,
+        et.FundamentalData,
+        cashflow_df,
+        on_conflict_columns=["stock_id", "created_at"],
+        update_columns=["free_cashflow", "operating_cashflow", "retrieve_at"],
     )
 
 

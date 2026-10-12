@@ -6,7 +6,6 @@ import asyncio
 import nest_asyncio
 from datetime import datetime
 from loguru import logger
-import pandas as pd
 
 nest_asyncio.apply()
 import numpy as np
@@ -19,7 +18,12 @@ env_path = PROJECT_ROOT / ".env"
 load_dotenv(dotenv_path=env_path)
 
 
-from data.db.statements import insert_dynamic_data, fetch_stock_ids, attach_stock_ids
+from data.db.statements import (
+    insert_dynamic_data,
+    fetch_stock_ids,
+    attach_stock_ids,
+    drop_missing_market_dates,
+)
 from data.db.client import init_async_db, get_async_mongodb
 from data.db.statements_mongo import fetch_dynamic_raw
 
@@ -55,13 +59,21 @@ async def exec_dynamic_data(
         async for metadata_df in fetch_dynamic_raw(stock_raw, query_date, ticker):
             found_any = True
             metadata_df = metadata_df.replace({np.nan: None})
-            metadata_df = attach_stock_ids(metadata_df, metadata_df, all_tickers)
 
-            metadata_df["created_at"] = pd.to_datetime(
-                metadata_df["created_at"]
-            ).dt.normalize()
+            # market_date becomes created_at (a NOT NULL primary key) downstream,
+            # so rows without one would abort the batch instead of inserting.
+            metadata_df = drop_missing_market_dates(metadata_df)
+            if metadata_df.empty:
+                continue
+
+            metadata_df = attach_stock_ids(metadata_df, metadata_df, all_tickers)
+            if metadata_df.empty:
+                continue
+
+            # insert_dynamic_data() rebuilds created_at from market_date, so dedupe
+            # on that same key -- the extraction timestamp never reaches the tables.
             metadata_df = metadata_df.drop_duplicates(
-                subset=["stock_id", "created_at"], keep="last"
+                subset=["stock_id", "market_date"], keep="last"
             )
 
             async with engine.begin() as conn:
@@ -74,4 +86,4 @@ async def exec_dynamic_data(
 
 
 if __name__ == "__main__":
-    asyncio.run(exec_dynamic_data(start_date=datetime.fromisoformat("2000-01-01")))
+    asyncio.run(exec_dynamic_data(start_date=datetime(2025, 1, 1)))

@@ -18,7 +18,12 @@ env_path = PROJECT_ROOT / ".env"
 load_dotenv(dotenv_path=env_path)
 
 
-from data.db.statements import insert_metadata, fetch_stock_ids, attach_stock_ids
+from data.db.statements import (
+    insert_metadata,
+    fetch_stock_ids,
+    attach_stock_ids,
+    drop_missing_market_dates,
+)
 from data.db.client import init_async_db, get_async_mongodb
 from data.db.statements_mongo import fetch_dynamic_raw
 
@@ -39,8 +44,17 @@ async def ingest_metadata(ticker: list[str] | None = None):
         ):
             found_any = True
             metadata_df = metadata_df.replace({np.nan: None})
+
+            # market_date becomes created_at (a NOT NULL primary key) in every
+            # snapshot table, so rows without one would abort the batch.
+            metadata_df = drop_missing_market_dates(metadata_df)
+            if metadata_df.empty:
+                continue
+
             metadata_df = metadata_df.drop_duplicates(subset=["ticker"], keep="last")
             metadata_df = metadata_df.dropna(subset=["symbol"])
+            if metadata_df.empty:
+                continue
 
             async with engine.begin() as conn:
                 await insert_metadata(conn, metadata_df)

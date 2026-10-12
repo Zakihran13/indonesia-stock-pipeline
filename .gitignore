@@ -225,3 +225,4 @@ data/processed/*
 
 # Local env files
 .env
+*.joblib

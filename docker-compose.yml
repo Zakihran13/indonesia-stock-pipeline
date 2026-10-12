@@ -1,0 +1,18 @@
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: idx_grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      GF_INSTALL_PLUGINS: grafana-mongodb-datasource
+      GF_SERVER_ROOT_URL: http://localhost:3001
+    extra_hosts:
+      # Lets Grafana reach MongoDB running on your Windows/WSL host
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  grafana_data:
