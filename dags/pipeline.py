@@ -68,7 +68,7 @@ def daily_raw_ingestion():
 
     @task
     def get_price_raw():
-        return asyncio.run(exec_historical_price_data(period="1d"))
+        return asyncio.run(exec_historical_price_data(period="1d", use_env_dates=False))
 
     # 3. Create a final task that runs after both async extraction tasks finish.
     # The 'outlets' parameter tells Airflow to update the asset when this succeeds.

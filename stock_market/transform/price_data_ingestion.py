@@ -104,4 +104,4 @@ async def exec_price_data(
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(exec_price_data())
+    loop.run_until_complete(exec_price_data(start_date=datetime(2024,1,1)))

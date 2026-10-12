@@ -11,10 +11,7 @@ from utils.helper import split_batch, log_bulk_write_results
 
 
 async def fetch_stock_ids(coll: AsyncIOMotorCollection) -> List[str]:
-    cursor = coll.find({}, {"ticker": 1})
-    data = await cursor.to_list()
-
-    return [n["ticker"] for n in data if "ticker"]
+    return await coll.distinct("ticker")
 
 
 async def fetch_metadata_ticker_dates(
@@ -116,6 +113,42 @@ async def fetch_dynamic_raw(
     """
     params: dict[str, Any] = {
         "created_at": {
+            "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        }
+    }
+
+    if ticker:
+        params["ticker"] = {"$in": ticker}
+
+    cursor = coll.find(params)
+
+    batch_data = []
+    async for doc in cursor:
+        batch_data.append(doc)
+
+        if len(batch_data) >= batch_size:
+            yield pd.DataFrame(batch_data)
+            batch_data = []
+
+    if batch_data:
+        yield pd.DataFrame(batch_data)
+
+
+async def fetch_cashflow_raw(
+    coll: AsyncIOMotorCollection,
+    current_date: datetime,
+    ticker: List[str] | None = None,
+    batch_size: int = 2_000,
+):
+    """Streams raw free cash flow periods in batches.
+
+    Filters on `fetched_at` (extraction time) like `fetch_dynamic_raw` does
+    for `created_at`: statement `period_end` values are fiscal dates months or
+    years in the past, so an extraction-time window is what selects the daily
+    incremental while still re-transforming a recent backfill.
+    """
+    params: dict[str, Any] = {
+        "fetched_at": {
             "$gte": current_date.replace(hour=0, minute=0, second=0, microsecond=0)
         }
     }
