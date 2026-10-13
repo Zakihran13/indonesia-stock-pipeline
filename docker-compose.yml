@@ -1,4 +1,36 @@
 services:
+  postgres:
+    image: postgres:16
+    container_name: idx_postgres
+    ports:
+      - "${POSTGRESQL_DB_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRESQL_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRESQL_DB_PASSWORD:?set POSTGRESQL_DB_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRESQL_DB_NAME:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    container_name: idx_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:latest
     container_name: idx_grafana
@@ -9,10 +41,14 @@ services:
     environment:
       GF_INSTALL_PLUGINS: grafana-mongodb-datasource
       GF_SERVER_ROOT_URL: http://localhost:3001
-    extra_hosts:
-      # Lets Grafana reach MongoDB running on your Windows/WSL host
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   grafana_data:
+  postgres_data:
+  mongo_data:
