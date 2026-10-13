@@ -87,15 +87,15 @@ async def exec_price_data(
     batch_tickers = split_batch(all_tickers, batch_size)
     logger.info(f"found {len(batch_tickers)} batches for every {batch_size} groups")
 
-    tasks = [
-        partial(
-            process_ticker_ingestion, engine, stock_raw, nr_tickers, tickers, query_date
-        )
-        for nr_tickers, tickers in enumerate(batch_tickers)
-    ]
-
     try:
-        await aiometer.run_all(tasks, max_at_once=2)
+        semaphore = asyncio.Semaphore(2)
+
+        async def run_limited(batch: list[dict], nr_tickers: int):
+            async with semaphore:
+                await process_ticker_ingestion(engine, stock_raw, nr_tickers, batch, query_date)
+
+        await asyncio.gather(*(run_limited(batch, nr_tickers) for nr_tickers, batch in enumerate(batch_tickers, start=1)))
+
     except Exception as e:
         logger.error(f"error while runing the job: {e}")
     finally:
@@ -103,5 +103,4 @@ async def exec_price_data(
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(exec_price_data(start_date=datetime(2024,1,1)))
+    asyncio.run(exec_price_data(start_date=datetime(2024,1,1)))

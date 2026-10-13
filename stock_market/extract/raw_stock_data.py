@@ -4,12 +4,7 @@ from pathlib import Path
 import sys
 import yfinance as yf
 
-from functools import partial
 import asyncio
-import aiometer
-import nest_asyncio
-
-nest_asyncio.apply()
 import numpy as np
 from datetime import datetime, UTC
 from loguru import logger
@@ -111,13 +106,16 @@ async def exec_metadata(tickers: list[str] | None = None):
 
     try:
         batches = split_batch(tickers, 50)
-        tasks = [partial(process_ticker, batch, collection) for batch in batches]
+        semaphore = asyncio.Semaphore(5)
 
-        await aiometer.run_all(tasks, max_at_once=5)
+        async def run_limited(batch: list[str]):
+            async with semaphore:
+                await process_ticker(batch, collection)
+
+        await asyncio.gather(*(run_limited(batch) for batch in batches))
     except Exception as e:
         logger.error(f"Error while processing the batch flow: {e}")
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(exec_metadata())
+    asyncio.run(exec_metadata())

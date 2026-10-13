@@ -771,23 +771,23 @@ async def exec_cashflow_data(
                 mode,
             )
 
-            tasks = [
-                partial(
-                    _run_cashflow_batch,
-                    collection,
-                    batch,
-                    mode,
-                    start,
-                    end,
-                    batch_no=batch_no,
-                    total_batches=total_batches,
-                    progress=progress,
-                    started_at=started_at,
-                )
-                for batch_no, batch in enumerate(batches, start=1)
-            ]
+            semaphore = asyncio.Semaphore(YF_CASHFLOW_MAX_AT_ONCE)
 
-            await aiometer.run_all(tasks, max_at_once=YF_CASHFLOW_MAX_AT_ONCE)
+            async def run_limited(batch: list[str], batch_no: int):
+                async with semaphore:
+                    await _run_cashflow_batch(
+                        collection,
+                        batch,
+                        mode,
+                        start,
+                        end,
+                        batch_no=batch_no,
+                        total_batches=total_batches,
+                        progress=progress,
+                        started_at=started_at,
+                    )
+
+            await asyncio.gather(*(run_limited(batch, batch_no) for batch_no, batch in enumerate(batches, start=1)))
 
             logger.info(
                 "[5/5] Done: {} batches, {} cashflow rows from {} tickers "
@@ -839,5 +839,4 @@ async def exec_daily_cashflow_data(
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(exec_historical_cashflow_data(start=datetime(2025,1,1)))
+    asyncio.run(exec_historical_cashflow_data(start=datetime(2025,1,1)))

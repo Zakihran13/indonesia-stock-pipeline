@@ -169,17 +169,18 @@ async def exec_historical_price_data(
         )
 
         try:
-            tasks = [
-                partial(process_historical_price_data,
-                collection,
-                batch,
-                period,
-                use_env_dates,
-            )
-                for batch in batches
-            ]
+            semaphore = asyncio.Semaphore(5)
 
-            await aiometer.run_all(tasks, max_at_once=5)
+            async def run_limited(batch: list[str]):
+                async with semaphore:
+                    await process_historical_price_data(
+                        collection,
+                        batch,
+                        period,
+                        use_env_dates,
+                    )
+
+            await asyncio.gather(*(run_limited(batch) for batch in batches))
 
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.warning("Ctrl+C detected. Cancelling outstanding fetch tasks...")
@@ -190,5 +191,4 @@ async def exec_historical_price_data(
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(exec_historical_price_data())
+    asyncio.run(exec_historical_price_data())

@@ -23,11 +23,8 @@ import sys
 from pathlib import Path
 
 import asyncio
-import nest_asyncio
 from datetime import datetime
 from loguru import logger
-
-nest_asyncio.apply()
 import numpy as np
 import pandas as pd
 

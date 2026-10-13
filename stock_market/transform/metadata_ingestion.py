@@ -3,11 +3,8 @@ import sys
 from pathlib import Path
 
 import asyncio
-import nest_asyncio
 from datetime import datetime, timedelta
 from loguru import logger
-
-nest_asyncio.apply()
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
