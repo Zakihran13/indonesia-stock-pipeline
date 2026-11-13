@@ -9,9 +9,13 @@ import math
 import datetime
 import pandas as pd
 import inflection
+import yaml
+from pathlib import Path
 from loguru import logger
 from decimal import Decimal, InvalidOperation
 from sqlalchemy import String, Text, Numeric, Integer, BigInteger, DateTime, Date
+
+from stock_market.config import DATA_DIR, ROOT_DIR
 
 YF_GLOBAL_MIN_INTERVAL_SECONDS = float(
     os.getenv("YF_GLOBAL_MIN_INTERVAL_SECONDS", "1.5")
@@ -121,9 +125,7 @@ class GlobalYfRateLimiter:
         """Decays the interval back toward the base after a successful request."""
         with self._lock:
             if self._interval > self._base_interval:
-                self._interval = max(
-                    self._base_interval, self._interval * 0.9
-                )
+                self._interval = max(self._base_interval, self._interval * 0.9)
             return self._interval
 
 
@@ -431,3 +433,151 @@ def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
                 )
 
     return records
+
+
+def get_stock_list_path() -> Path:
+    configured_path = os.getenv("STOCK_LIST_PATH")
+    if configured_path:
+        path = Path(configured_path)
+        return path if path.is_absolute() else ROOT_DIR / path
+
+    return DATA_DIR / "indonesian_stock_list.json"
+
+
+DEFAULT_TRAIN_CONFIG = (
+    ROOT_DIR / "stock_market" / "analytics" / "configs" / "train.yaml"
+)
+
+DEFAULT_INFERENCE_CONFIG = (
+    ROOT_DIR / "stock_market" / "analytics" / "configs" / "inference.yaml"
+)
+
+TRAIN_CONFIG_HEADER = """\
+# Training configuration for stock_market.analytics.training.
+#
+# `feature_selection` is written by select_features() after every SHAP-RFE run.
+# The writer merges into this tree instead of replacing the file, so manually
+# added sections/keys are preserved on future updates.
+#
+# To extend the config, add new keys or top-level sections (e.g. `training`)
+# below. Bump `schema_version` only when the layout changes in a way that
+# needs a migration.
+"""
+
+INFERENCE_CONFIG_HEADER = """\
+# Inference configuration for stock_market.analytics.training.
+#
+# Written by train.py after every successful training run. It points serving
+# code at the latest exported model and records the feature order, selected
+# hyperparameters, data window, and holdout metrics used for that model.
+#
+# `model.path` is relative to the project root unless it is absolute.
+# Existing top-level keys are merged on update, so future additions made here
+# are preserved. `schema_version` allows migrations if the layout changes.
+"""
+
+
+def to_builtin(value: Any) -> Any:
+    """Convert numpy/pandas scalars and containers into YAML-safe Python types."""
+    if isinstance(value, dict):
+        return {key: to_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_builtin(item) for item in value]
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (AttributeError, ValueError):
+            pass
+    if hasattr(value, "tolist"):
+        return to_builtin(value.tolist())
+    return value
+
+
+def load_train_config(path: str | Path = DEFAULT_TRAIN_CONFIG) -> dict[str, Any]:
+    """Read a YAML config, returning an empty dict when it does not exist."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_inference_config(
+    path: str | Path = DEFAULT_INFERENCE_CONFIG,
+) -> dict[str, Any]:
+    """Read ``inference.yaml``."""
+    return load_train_config(path)
+
+
+def save_selected_features(
+    features: List[str],
+    score: float,
+    params: dict[str, Any],
+    path: str | Path = DEFAULT_TRAIN_CONFIG,
+) -> Path:
+    """
+    Persist the feature-selection result into train.yaml.
+
+    The config is merged instead of overwritten, so sections/keys that are
+    added manually in the future (e.g. model hyperparameters, experiment
+    settings) survive the next feature-selection run.
+    """
+    path = Path(path)
+    config = load_train_config(path)
+
+    # Keep the update-friendly top-level sections present even if the file is
+    # recreated from scratch.
+    feature_selection = config.setdefault("feature_selection", {})
+    config.setdefault("training", {})
+    feature_selection.update(
+        {
+            "schema_version": 1,
+            "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "params": to_builtin(params),
+            "best": {
+                "cv_f1_macro": float(score),
+                "n_features": len(features),
+            },
+            "features": [str(feature) for feature in features],
+        }
+    )
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write(TRAIN_CONFIG_HEADER)
+        f.write("\n")
+        yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
+
+    logger.success(
+        "Wrote {} selected feature(s) (CV F1 Macro = {:.6f}) to {}",
+        len(features),
+        float(score),
+        path,
+    )
+    return path
+
+
+def save_inference_config(
+    config: dict[str, Any],
+    path: str | Path = DEFAULT_INFERENCE_CONFIG,
+) -> Path:
+    """
+    Persist the latest training result into inference.yaml.
+
+    Top-level keys already present in the file are preserved unless they are
+    part of the new result, so future serving settings can live alongside the
+    generated metadata.
+    """
+    path = Path(path)
+    merged = load_train_config(path)
+    merged.update(to_builtin(config))
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write(INFERENCE_CONFIG_HEADER)
+        f.write("\n")
+        yaml.safe_dump(merged, f, sort_keys=False, default_flow_style=False)
+
+    logger.success("Wrote inference config to {}", path)
+    return path

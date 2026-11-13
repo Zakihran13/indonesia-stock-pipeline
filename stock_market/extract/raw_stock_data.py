@@ -22,7 +22,7 @@ load_dotenv(dotenv_path=env_path)
 from data.db.statements_mongo import upsert_data
 from utils.helper import split_batch, snake_case_columns
 from data.db.client import get_async_mongodb
-from stock_market.config import get_stock_list_path
+from utils.helper import get_stock_list_path
 
 
 def _resolve_market_date(metadata_df: pd.DataFrame) -> pd.Series:

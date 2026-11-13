@@ -1,0 +1,142 @@
+# Training configuration for stock_market.analytics.training.
+#
+# `feature_selection` is written by select_features() after every SHAP-RFE run.
+# The writer merges into this tree instead of replacing the file, so manually
+# added sections/keys are preserved on future updates.
+#
+# To extend the config, add new keys or top-level sections (e.g. `training`)
+# below. Bump `schema_version` only when the layout changes in a way that
+# needs a migration.
+
+feature_selection:
+  schema_version: 1
+  updated_at: '2026-11-13T00:07:21'
+  params:
+    stock_ids: []
+    start_date: '2017-01-01'
+    end_date: '2020-01-01'
+    n_estimators: 800
+    min_features: 10
+    step: 0.1
+    cv: 3
+    device: cuda
+    horizon: 10
+    sample_fraction: 0.25
+    sample_random_state: 42
+    prepared_rows: 22145
+    sampled_rows: 5536
+  best:
+    cv_f1_macro: 0.48567059471062074
+    n_features: 32
+  features:
+  - atr_14_normalized
+  - daily_range_normalized
+  - stochastic_pct_k_14
+  - rank_volatility_20d_ann
+  - volatility_25d_ann
+  - distance_low_52w
+  - volatility_5d_ann
+  - realized_kurtosis_60d
+  - ulcer_index_60d
+  - close_position_in_range
+  - rolling_max_drawdown_60d
+  - volatility_10d_ann
+  - rank_momentum_120d
+  - rank_momentum_12_1
+  - momentum_5d
+  - momentum_30d
+  - rsi_14
+  - distance_high_52w
+  - moving_avg_slope_10d
+  - rank_distance_high_52w
+  - momentum_60d
+  - volatility_30d_ann
+  - sector_rel_momentum_120d
+  - bollinger_pct_b_20
+  - momentum_10d
+  - momentum_20d
+  - volatility_15d_ann
+  - sector_rel_momentum_20d
+  - rank_momentum_60d
+  - upper_shadow_ratio
+  - efficiency_ratio_20d
+  - gap
+training:
+  feature_engineering: false
+  features: []
+  feature_selection:
+    sample_fraction: 0.25
+    random_state: 42
+  data:
+    start_date: '2020-01-01'
+    end_date: null
+    stock_ids: []
+  split:
+    train_fraction: 0.7
+    validation_fraction: 0.15
+    embargo_days: 20
+  search:
+    enabled: true
+    n_iter: 50
+    cv: 3
+    scoring: f1_macro
+    n_estimators: 500
+    random_state: 42
+    n_jobs: 1
+    verbose: 1
+    param_distributions:
+      max_depth:
+      - 3
+      - 6
+      - 8
+      learning_rate:
+      - 0.01
+      - 0.03
+      - 0.05
+      - 0.1
+      subsample:
+      - 0.6
+      - 0.7
+      - 0.8
+      - 0.9
+      - 1.0
+      colsample_bytree:
+      - 0.6
+      - 0.7
+      - 0.8
+      - 0.9
+      - 1.0
+      min_child_weight:
+      - 1
+      - 3
+      - 5
+      - 10
+      gamma:
+      - 0
+      - 0.1
+      - 0.5
+      - 1
+      reg_lambda:
+      - 1
+      - 5
+      - 10
+      reg_alpha:
+      - 0
+      - 0.1
+      - 1
+  model:
+    n_estimators: 3000
+    early_stopping_rounds: 150
+    device: auto
+    verbose: false
+    fixed_params:
+      objective: multi:softprob
+      num_class: 3
+      eval_metric: mlogloss
+      tree_method: hist
+      random_state: 42
+      enable_categorical: true
+  output:
+    model_dir: stock_market/analytics/models
+    model_name: outperformer_xgb_latest.ubj
+    inference_config: stock_market/analytics/configs/inference.yaml

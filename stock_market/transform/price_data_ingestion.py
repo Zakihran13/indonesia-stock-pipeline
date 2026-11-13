@@ -103,4 +103,4 @@ async def exec_price_data(
 
 
 if __name__ == "__main__":
-    asyncio.run(exec_price_data(start_date=datetime(2024,1,1)))
+    asyncio.run(exec_price_data(start_date=datetime(2016,1,1)))

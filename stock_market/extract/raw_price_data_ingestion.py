@@ -58,9 +58,7 @@ YF_HISTORICAL_START = datetime.strptime(start_raw, date_format) if start_raw els
 YF_HISTORICAL_END = datetime.strptime(end_raw, date_format) if end_raw else None
 
 
-def _build_history_kwargs(
-    period: str, use_env_dates: bool = True
-) -> dict[str, Any]:
+def _build_history_kwargs(period: str, use_env_dates: bool = True) -> dict[str, Any]:
     """Builds yfinance history kwargs from configured date/period settings."""
 
     history_kwargs: dict[str, Any] = {"interval": YF_HISTORICAL_INTERVAL}
@@ -161,7 +159,7 @@ async def exec_historical_price_data(
             logger.warning("No tickers found in metadata table. Skipping ingestion.")
             return
 
-        batches = split_batch(tickers, 50)
+        batches = split_batch(tickers[:500], 50)
         logger.info(
             "Prepared {} ticker batches (batch size: 50) from {} tickers",
             len(batches),

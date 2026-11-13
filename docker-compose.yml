@@ -48,7 +48,37 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  mlflow:
+    build:
+      context: ./docker/mlflow
+    container_name: idx_mlflow
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - "postgresql+psycopg2://${POSTGRESQL_DB_USER:-postgres}:${POSTGRESQL_DB_PASSWORD}@postgres:5432/${POSTGRESQL_DB_NAME:-postgres}"
+      - --artifacts-destination
+      - /mlartifacts
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   grafana_data:
   postgres_data:
   mongo_data:
+  mlflow_artifacts:
