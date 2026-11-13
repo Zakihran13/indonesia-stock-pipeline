@@ -1,14 +1,27 @@
 import asyncio
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import List
 
-import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from loguru import logger
-from sqlalchemy import select
-from typing import List, Dict
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    Float,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    insert,
+    literal,
+    select,
+    text,
+)
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,193 +31,207 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 from data.db import entities_transformed as et
 from data.db.client import init_async_db
-from data.db.statements import insert_indicators_data, fetch_frame
+from data.db.statements import fetch_frame, insert_indicators_data
+from stock_market.config import (
+    DEFAULT_STOCK_BATCH_SIZE,
+    FEATURE_WARMUP_DAYS,
+    RANK_FEATURES,
+)
+from utils import indicators_calc
 
-RECOMMENDATION_SCORES = {
-    "strong buy": 2,
-    "buy": 1,
-    "hold": 0,
-    "neutral": 0,
-    "sell": -1,
-    "strong sell": -2,
-}
-
-
-def _asof_merge(
-    prices: pd.DataFrame, snapshots: pd.DataFrame, snapshot_date: str
-) -> pd.DataFrame:
-    if snapshots.empty:
-        return prices
-
-    snapshots = snapshots.copy()
-    snapshots[snapshot_date] = pd.to_datetime(snapshots[snapshot_date])
-    frames = []
-    for stock_id, price_group in prices.groupby("stock_id", sort=False):
-        snapshot_group = snapshots[snapshots["stock_id"] == stock_id]
-        price_group = price_group.sort_values("indicator_date")
-        if snapshot_group.empty:
-            frames.append(price_group)
-            continue
-        snapshot_group = snapshot_group.copy()
-        snapshot_group["__snapshot_date"] = snapshot_group[snapshot_date]
-        snapshot_columns = [
-            "__snapshot_date",
-            *[
-                column
-                for column in snapshot_group.columns
-                if column not in price_group.columns
-                and column not in {"stock_id", snapshot_date, "__snapshot_date"}
-            ],
-        ]
-        snapshot_group = snapshot_group.reindex(columns=snapshot_columns)
-        merged = pd.merge_asof(
-            price_group,
-            snapshot_group.sort_values("__snapshot_date"),
-            left_on="indicator_date",
-            right_on="__snapshot_date",
-            direction="backward",
-            suffixes=("", "_snapshot"),
-        )
-        frames.append(merged.drop(columns="__snapshot_date"))
-    return pd.concat(frames, ignore_index=True)
+_CROSS_SECTION_STAGE = Table(
+    "indicator_cross_section_stage",
+    MetaData(),
+    Column("stock_id", Integer, primary_key=True),
+    Column("indicator_date", Date, primary_key=True),
+    Column("sector", String),
+    *(Column(feature, Float) for feature in RANK_FEATURES),
+    Column("is_target", Boolean, nullable=False),
+)
 
 
-def build_indicator_frame(
-    prices: pd.DataFrame,
-    metadata: pd.DataFrame,
-    fundamentals: pd.DataFrame,
-    dynamic: pd.DataFrame,
-    analytics: pd.DataFrame,
-    start_date: datetime | None = None,
-) -> pd.DataFrame:
-    if prices.empty:
-        return pd.DataFrame()
+async def _stage_cross_section(conn: AsyncConnection, indicators: pd.DataFrame) -> None:
+    columns = ["stock_id", "indicator_date", "sector", *RANK_FEATURES]
+    staged = indicators[columns].astype(object)
+    staged = staged.where(pd.notna(staged), None)
+    staged["is_target"] = True
+    if not staged.empty:
+        await conn.execute(insert(_CROSS_SECTION_STAGE), staged.to_dict("records"))
 
-    indicators = prices.copy()
-    indicators["indicator_date"] = pd.to_datetime(indicators["trade_date"])
-    indicators = indicators.sort_values(["stock_id", "indicator_date"])
-    indicators = _asof_merge(indicators, metadata, "created_at")
-    indicators = _asof_merge(indicators, fundamentals, "created_at")
-    indicators = _asof_merge(indicators, dynamic, "created_at")
-    indicators = _asof_merge(indicators, analytics, "created_at")
 
-    for column in (
-        "sector",
-        "market_cap",
-        "free_cashflow",
-        "current_price",
-        "target_mean_price",
-        "recommendation_status",
-        "earnings_start_date",
-        "return_on_equity",
-        "payout_ratio",
-        "total_debt",
-        "average_analyst_rating",
-    ):
-        if column not in indicators:
-            indicators[column] = np.nan
-
-    grouped = indicators.groupby("stock_id", sort=False)
-    indicators["daily_return"] = grouped["close"].pct_change()
-    indicators["moving_average_30d"] = grouped["close"].transform(
-        lambda values: values.rolling(30, min_periods=30).mean()
+async def _stage_existing_peers(conn: AsyncConnection, target_ids: set[int]) -> None:
+    columns = ["stock_id", "indicator_date", "sector", *RANK_FEATURES]
+    target_dates = select(_CROSS_SECTION_STAGE.c.indicator_date).distinct()
+    peers = select(
+        *(getattr(et.IndicatorsData, column) for column in columns),
+        literal(False),
+    ).where(
+        et.IndicatorsData.stock_id.not_in(sorted(target_ids)),
+        et.IndicatorsData.indicator_date.in_(target_dates),
     )
-    indicators["momentum_30d"] = grouped["close"].transform(
-        lambda values: values.pct_change(30)
-    )
-    indicators["volatility_5d"] = grouped["daily_return"].transform(
-        lambda values: values.rolling(5, min_periods=5).std() * np.sqrt(252)
-    )
-    indicators["volatility_20d"] = grouped["daily_return"].transform(
-        lambda values: values.rolling(20, min_periods=20).std() * np.sqrt(252)
-    )
-    indicators["average_volume_20d"] = grouped["volume"].transform(
-        lambda values: values.rolling(20, min_periods=1).mean()
+    await conn.execute(
+        insert(_CROSS_SECTION_STAGE).from_select([*columns, "is_target"], peers)
     )
 
-    market_cap = pd.to_numeric(indicators["market_cap"], errors="coerce")
-    free_cashflow = pd.to_numeric(indicators["free_cashflow"], errors="coerce")
-    indicators["free_cashflow_to_market_cap"] = free_cashflow.div(
-        market_cap.replace(0, np.nan)
-    )
 
-    current_price = pd.to_numeric(indicators["current_price"], errors="coerce")
-    target_price = pd.to_numeric(indicators["target_mean_price"], errors="coerce")
-    indicators["target_price_deviation"] = target_price.div(
-        current_price.replace(0, np.nan)
-    ).sub(1)
-
-    recommendation = (
-        indicators["recommendation_status"]
-        .astype("string")
-        .str.lower()
-        .map(RECOMMENDATION_SCORES)
-    )
-    indicators["recommendation_score"] = recommendation
-    indicators["recommendation_score_change"] = grouped["recommendation_score"].diff()
-
-    earnings_date = pd.to_datetime(
-        indicators["earnings_start_date"], errors="coerce"
-    ).dt.normalize()
-    indicator_dates = indicators["indicator_date"].dt.normalize()
-    indicators["days_until_earnings"] = (earnings_date - indicator_dates).dt.days
-    indicators["earnings_within_7d"] = indicators["days_until_earnings"].between(
-        0, 7, inclusive="both"
-    )
-
-    if start_date is not None:
-        start_timestamp = pd.Timestamp(start_date).tz_localize(None).normalize()
-        indicators = indicators[indicators["indicator_date"] >= start_timestamp]
-
-    indicators["indicator_date"] = indicators["indicator_date"].dt.date
-    output_columns = list(et.IndicatorsData.__table__.columns.keys())
-    return indicators.reindex(columns=output_columns).replace({np.nan: None})
+async def _update_cross_section(conn: AsyncConnection) -> None:
+    # Average percentile ranks match pandas rank(method="average", pct=True).
+    rank_expressions = [f"""CASE WHEN {feature} IS NOT NULL THEN
+            (RANK() OVER (PARTITION BY indicator_date ORDER BY {feature} NULLS LAST)
+             + (COUNT(*) OVER (PARTITION BY indicator_date, {feature}) - 1) / 2.0)
+            / NULLIF(COUNT({feature}) OVER (PARTITION BY indicator_date), 0)
+        END AS {rank_column}""" for feature, rank_column in RANK_FEATURES.items()]
+    sector_expressions = [f"""CASE WHEN sector IS NOT NULL THEN {feature} -
+            AVG({feature}) OVER (PARTITION BY indicator_date, sector)
+        END AS sector_rel_{feature}""" for feature in ("momentum_20d", "momentum_120d")]
+    output_columns = [
+        *RANK_FEATURES.values(),
+        "sector_rel_momentum_20d",
+        "sector_rel_momentum_120d",
+    ]
+    assignments = ", ".join(f"{column} = ranked.{column}" for column in output_columns)
+    expressions = ", ".join([*rank_expressions, *sector_expressions])
+    await conn.execute(text(f"""
+            UPDATE stock_market.indicators_data AS target
+            SET {assignments}
+            FROM (
+                SELECT stock_id, indicator_date, is_target, {expressions}
+                FROM indicator_cross_section_stage
+            ) AS ranked
+            WHERE ranked.is_target
+              AND target.stock_id = ranked.stock_id
+              AND target.indicator_date = ranked.indicator_date
+            """))
 
 
 async def materialize_indicators(
-    stock_ids: List[int] | None = None, start_date: datetime | None = None
+    stock_ids: List[int] | None = None,
+    start_date: datetime | None = None,
+    batch_size: int = DEFAULT_STOCK_BATCH_SIZE,
 ) -> int | None:
-    """Build and upsert indicators, optionally starting from a historical date."""
+    """Build indicators in stock batches and calculate cross-sectional features.
+
+    With ``stock_ids``, only those stocks are calculated. Their ranks and sector
+    means use existing indicator rows for other stocks on the same dates; missing
+    or stale peer rows can make the resulting cross-section incomplete.
+    """
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than 0")
 
     if not start_date:
         start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
+    target_ids = set(stock_ids) if stock_ids is not None else None
+    if target_ids is not None and not target_ids:
+        logger.warning("stock_ids is empty; nothing to materialize")
+        return 0
+
     engine = init_async_db()
     try:
         async with engine.begin() as conn:
-            models = [
-                (et.PriceData, et.PriceData.trade_date),
-                (et.StockMetadata, et.StockMetadata.created_at),
-                (et.FundamentalData, et.FundamentalData.created_at),
-                (et.DynamicData, et.DynamicData.created_at),
-                (et.AnalyticData, et.AnalyticData.created_at),
-            ]
+            fetch_start_date = start_date - timedelta(days=FEATURE_WARMUP_DAYS)
+            await conn.execute(text("""
+                    CREATE TEMPORARY TABLE indicator_cross_section_stage (
+                        stock_id INTEGER NOT NULL,
+                        indicator_date DATE NOT NULL,
+                        sector VARCHAR,
+                        momentum_20d DOUBLE PRECISION,
+                        momentum_60d DOUBLE PRECISION,
+                        momentum_120d DOUBLE PRECISION,
+                        momentum_12_1 DOUBLE PRECISION,
+                        volatility_20d_ann DOUBLE PRECISION,
+                        risk_adjusted_momentum DOUBLE PRECISION,
+                        distance_high_52w DOUBLE PRECISION,
+                        is_target BOOLEAN NOT NULL,
+                        PRIMARY KEY (stock_id, indicator_date)
+                    ) ON COMMIT DROP
+                    """))
 
-            frames = await asyncio.gather(
-                *(
-                    fetch_frame(conn, model, date_col, stock_ids, start_date)
-                    for model, date_col in models
+            last_stock_id = None
+            row_count = 0
+            found_prices = False
+            while True:
+                stmt = (
+                    select(et.PriceData.stock_id)
+                    .where(et.PriceData.trade_date >= fetch_start_date)
+                    .distinct()
+                    .order_by(et.PriceData.stock_id)
+                    .limit(batch_size)
                 )
-            )
+                if target_ids is not None:
+                    stmt = stmt.where(et.PriceData.stock_id.in_(sorted(target_ids)))
 
-            if all(df.empty for df in frames):
+                if last_stock_id is not None:
+                    stmt = stmt.where(et.PriceData.stock_id > last_stock_id)
+
+                result = await conn.execute(stmt)
+                batch_ids = list(result.scalars().all())
+
+                if not batch_ids:
+                    break
+
+                last_stock_id = batch_ids[-1]
+                found_prices = True
+
+                price_frame = await fetch_frame(
+                    conn,
+                    et.PriceData,
+                    et.PriceData.trade_date,
+                    batch_ids,
+                    fetch_start_date,
+                )
+
+                if price_frame.empty:
+                    continue
+
+                metadata_result = await conn.execute(
+                    select(et.StockMetadata).where(
+                        et.StockMetadata.stock_id.in_(batch_ids),
+                        et.StockMetadata.sector.is_not(None),
+                    )
+                )
+                metadata_frame = pd.DataFrame(metadata_result.mappings().all())
+
+                indicator_frame = indicators_calc.build_indicator_frame(
+                    price_frame,
+                    metadata_frame,
+                    start_date=start_date,
+                    calculate_cross_section=False,
+                )
+                await _stage_cross_section(conn, indicator_frame)
+
+                await insert_indicators_data(conn, indicator_frame)
+
+                row_count += len(indicator_frame)
+                logger.info(
+                    "Processed {} stocks through ID {}; materialized {} indicator rows",
+                    len(batch_ids),
+                    last_stock_id,
+                    row_count,
+                )
+                del price_frame, metadata_frame, indicator_frame
+
+            if not found_prices:
                 logger.error(f"NO DATA IS FOUND FOR: **{start_date}**")
                 return
 
-            indicator_frame = build_indicator_frame(*frames, start_date=start_date)
-            await insert_indicators_data(conn, indicator_frame)
-            logger.info("Materialized {} indicator rows", len(indicator_frame))
-            return len(indicator_frame)
+            if target_ids is not None:
+                logger.warning(
+                    "Targeted cross-sectional calculations use existing peer "
+                    "indicators; missing or stale rows may produce incomplete results"
+                )
+                await _stage_existing_peers(conn, target_ids)
+            await _update_cross_section(conn)
+            logger.info("Materialized {} indicator rows", row_count)
+            return row_count
     finally:
         await engine.dispose()
 
 
 if __name__ == "__main__":
-    from datetime import timedelta
-
     asyncio.run(
         materialize_indicators(
-            stock_ids=[1, 2, 3, 4, 5],
-            start_date=datetime(2026, 9, 18) - timedelta(days=60),
+            start_date=datetime(2016, 1, 1),
         )
     )

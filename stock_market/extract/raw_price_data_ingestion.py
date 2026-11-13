@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from functools import partial
 import aiometer
+from datetime import datetime
 
 from motor.motor_asyncio import AsyncIOMotorCollection
 
@@ -42,24 +43,33 @@ logger.add(
 )
 
 YF_HISTORICAL_PERIOD = os.getenv("YF_HISTORICAL_PERIOD", "max")
-YF_HISTORICAL_START = os.getenv("YF_HISTORICAL_START")
-YF_HISTORICAL_END = os.getenv("YF_HISTORICAL_END")
+# YF_HISTORICAL_START = os.getenv("YF_HISTORICAL_START")
+# YF_HISTORICAL_END = os.getenv("YF_HISTORICAL_END")
 YF_HISTORICAL_INTERVAL = os.getenv("YF_HISTORICAL_INTERVAL", "1d")
 YF_HISTORICAL_TIMEOUT_SECONDS = int(os.getenv("YF_HISTORICAL_TIMEOUT_SECONDS", "30"))
 
 
-def _build_history_kwargs(period: str) -> dict[str, Any]:
+date_format = "%Y-%m-%d"
+
+start_raw = os.getenv("YF_HISTORICAL_START")
+end_raw = os.getenv("YF_HISTORICAL_END")
+
+YF_HISTORICAL_START = datetime.strptime(start_raw, date_format) if start_raw else None
+YF_HISTORICAL_END = datetime.strptime(end_raw, date_format) if end_raw else None
+
+
+def _build_history_kwargs(period: str, use_env_dates: bool = True) -> dict[str, Any]:
     """Builds yfinance history kwargs from configured date/period settings."""
 
     history_kwargs: dict[str, Any] = {"interval": YF_HISTORICAL_INTERVAL}
 
-    if YF_HISTORICAL_START:
+    if use_env_dates and YF_HISTORICAL_START:
         history_kwargs["start"] = YF_HISTORICAL_START
 
-    if YF_HISTORICAL_END:
+    if use_env_dates and YF_HISTORICAL_END:
         history_kwargs["end"] = YF_HISTORICAL_END
 
-    if "start" not in history_kwargs and "end" not in history_kwargs:
+    if "start" not in history_kwargs or "end" not in history_kwargs:
         history_kwargs["period"] = period
 
     history_kwargs["timeout"] = YF_HISTORICAL_TIMEOUT_SECONDS
@@ -77,7 +87,10 @@ def _fetch_history_blocking(
 
 
 async def process_historical_price_data(
-    collection: AsyncIOMotorCollection, ticker: list[str], period: str
+    collection: AsyncIOMotorCollection,
+    ticker: list[str],
+    period: str,
+    use_env_dates: bool = True,
 ):
     """Fetches historical price data for a ticker batch using yfinance."""
 
@@ -86,7 +99,7 @@ async def process_historical_price_data(
     logger.debug("Fetching historical price data for batch of {} tickers", len(ticker))
 
     try:
-        history_kwargs = _build_history_kwargs(period)
+        history_kwargs = _build_history_kwargs(period, use_env_dates)
         logger.debug("Calling yfinance history with params: {}", history_kwargs)
         price_data = _fetch_history_blocking(flatten_ticker, history_kwargs)
 
@@ -119,7 +132,9 @@ async def process_historical_price_data(
 
 
 async def exec_historical_price_data(
-    tickers: list[str] | None = None, period: str = YF_HISTORICAL_PERIOD
+    tickers: list[str] | None = None,
+    period: str = YF_HISTORICAL_PERIOD,
+    use_env_dates: bool = True,
 ) -> None:
     """Fetches historical price data for all tickers and stores it in the database."""
 
@@ -144,7 +159,7 @@ async def exec_historical_price_data(
             logger.warning("No tickers found in metadata table. Skipping ingestion.")
             return
 
-        batches = split_batch(tickers, 50)
+        batches = split_batch(tickers[:500], 50)
         logger.info(
             "Prepared {} ticker batches (batch size: 50) from {} tickers",
             len(batches),
@@ -152,12 +167,18 @@ async def exec_historical_price_data(
         )
 
         try:
-            tasks = [
-                partial(process_historical_price_data, collection, batch, period)
-                for batch in batches
-            ]
+            semaphore = asyncio.Semaphore(5)
 
-            await aiometer.run_all(tasks, max_at_once=5)
+            async def run_limited(batch: list[str]):
+                async with semaphore:
+                    await process_historical_price_data(
+                        collection,
+                        batch,
+                        period,
+                        use_env_dates,
+                    )
+
+            await asyncio.gather(*(run_limited(batch) for batch in batches))
 
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.warning("Ctrl+C detected. Cancelling outstanding fetch tasks...")
@@ -168,5 +189,4 @@ async def exec_historical_price_data(
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(exec_historical_price_data())
+    asyncio.run(exec_historical_price_data())

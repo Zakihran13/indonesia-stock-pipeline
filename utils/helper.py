@@ -1,22 +1,208 @@
-from typing import List, Any
+from typing import Any, Callable, List, TypeVar
 import re
 import os
+import random
+import threading
 import asyncio
 import time
 import math
 import datetime
 import pandas as pd
 import inflection
+import yaml
+from pathlib import Path
 from loguru import logger
 from decimal import Decimal, InvalidOperation
 from sqlalchemy import String, Text, Numeric, Integer, BigInteger, DateTime, Date
 
+from stock_market.config import DATA_DIR, ROOT_DIR
+
 YF_GLOBAL_MIN_INTERVAL_SECONDS = float(
     os.getenv("YF_GLOBAL_MIN_INTERVAL_SECONDS", "1.5")
 )
+YF_BACKOFF_MAX_RETRIES = int(os.getenv("YF_BACKOFF_MAX_RETRIES", "5"))
+YF_BACKOFF_BASE_SECONDS = float(os.getenv("YF_BACKOFF_BASE_SECONDS", "5"))
+YF_BACKOFF_MAX_SECONDS = float(os.getenv("YF_BACKOFF_MAX_SECONDS", "120"))
 
-_yf_rate_limit_lock = asyncio.Lock()
-_yf_last_request_ts = 0.0
+# Substrings identifying Yahoo throttling / transient upstream failures.
+# yfinance surfaces these inconsistently across versions (YFRateLimitError,
+# HTTP errors, or plain text messages), so message matching is the fallback.
+_TRANSIENT_YF_ERROR_NEEDLES = (
+    "429",
+    "too many requests",
+    "rate limit",
+    "403",
+    "forbidden",
+    "502",
+    "503",
+    "504",
+    "service unavailable",
+    "gateway",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "temporarily",
+    "max retries exceeded",
+)
+
+T = TypeVar("T")
+
+
+class GlobalYfRateLimiter:
+    """Process-wide pacing for outbound yfinance requests.
+
+    Every caller - asyncio tasks and ``asyncio.to_thread`` workers alike -
+    reserves the next request slot from a single shared timestamp under a
+    thread lock, so concurrent batches are spaced by at least ``min_interval``
+    seconds no matter which concurrency primitive runs them. Slots are
+    reserved ahead of time, which keeps the spacing even and prevents
+    concurrent workers from collapsing into a burst.
+
+    The interval is adaptive: a rate-limit response multiplies it
+    (``penalize``) and every successful request decays it back toward the base
+    value (``reward``), so the whole flow slows down while Yahoo is
+    throttling instead of hammering it harder.
+    """
+
+    def __init__(
+        self,
+        min_interval: float,
+        penalty_factor: float = 2.0,
+        ceiling: float = 60.0,
+    ):
+        self._base_interval = max(0.0, float(min_interval))
+        self._interval = self._base_interval
+        self._penalty_factor = max(1.0, float(penalty_factor))
+        self._ceiling = max(self._base_interval, float(ceiling))
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    @property
+    def interval(self) -> float:
+        """Currently effective per-request interval in seconds."""
+        with self._lock:
+            return self._interval
+
+    @property
+    def base_interval(self) -> float:
+        return self._base_interval
+
+    def _reserve_slot(self) -> float:
+        """Claims the next request slot and returns how long the caller waits."""
+        with self._lock:
+            now = time.monotonic()
+            slot_start = max(now, self._next_slot)
+            self._next_slot = slot_start + self._interval
+            return slot_start - now
+
+    def acquire_blocking(self) -> float:
+        """Waits for this caller's slot. Safe to call from worker threads."""
+        wait = self._reserve_slot()
+        if wait > 0:
+            time.sleep(wait)
+        return wait
+
+    async def acquire(self) -> float:
+        """Async variant of :meth:`acquire_blocking`."""
+        wait = self._reserve_slot()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        return wait
+
+    def penalize(self) -> float:
+        """Escalates pacing after a rate-limit response; returns new interval."""
+        with self._lock:
+            self._interval = min(
+                self._ceiling,
+                max(
+                    self._interval * self._penalty_factor,
+                    self._base_interval * self._penalty_factor,
+                ),
+            )
+            return self._interval
+
+    def reward(self) -> float:
+        """Decays the interval back toward the base after a successful request."""
+        with self._lock:
+            if self._interval > self._base_interval:
+                self._interval = max(self._base_interval, self._interval * 0.9)
+            return self._interval
+
+
+# Shared by every flow in this process; import and call
+# `await wait_for_global_yf_rate_limit()` (async) or
+# `yf_rate_limiter.acquire_blocking()` (threads) before each yfinance request.
+yf_rate_limiter = GlobalYfRateLimiter(YF_GLOBAL_MIN_INTERVAL_SECONDS)
+
+
+def is_transient_yf_error(error: BaseException) -> bool:
+    """True for Yahoo rate limiting and other transient transport failures."""
+
+    try:
+        from yfinance.exceptions import YFRateLimitError
+
+        if isinstance(error, YFRateLimitError):
+            return True
+    except Exception:
+        pass
+
+    message = str(error).lower()
+    return any(needle in message for needle in _TRANSIENT_YF_ERROR_NEEDLES)
+
+
+def compute_backoff_delay(
+    attempt: int,
+    base: float = YF_BACKOFF_BASE_SECONDS,
+    maximum: float = YF_BACKOFF_MAX_SECONDS,
+    jitter: float = 0.2,
+) -> float:
+    """Exponential backoff with jitter: ``base * 2**attempt``, capped at ``maximum``."""
+
+    delay = min(maximum, base * (2 ** max(0, attempt)))
+    if jitter:
+        delay *= random.uniform(1 - jitter, 1 + jitter)
+    return max(0.0, min(maximum, delay))
+
+
+def with_yf_backoff(
+    fn: Callable[[], T],
+    description: str = "yfinance request",
+    max_retries: int | None = None,
+) -> T:
+    """Runs a blocking yfinance call, retrying transient failures with backoff.
+
+    Each retry sleeps ``base * 2**attempt`` (jittered) and escalates the global
+    rate limiter, so *all* workers slow down while Yahoo is throttling us.
+    Non-transient errors are raised immediately; the last transient error is
+    re-raised once retries are exhausted.
+    """
+
+    retries = YF_BACKOFF_MAX_RETRIES if max_retries is None else max_retries
+    attempt = 0
+
+    while True:
+        try:
+            return fn()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not is_transient_yf_error(error) or attempt >= retries:
+                raise
+
+            delay = compute_backoff_delay(attempt)
+            new_interval = yf_rate_limiter.penalize()
+            logger.warning(
+                "{} hit a transient error ({}); backing off {:.1f}s "
+                "(retry {}/{}), global yfinance interval now {:.1f}s",
+                description,
+                error,
+                delay,
+                attempt + 1,
+                retries,
+                new_interval,
+            )
+            time.sleep(delay)
+            attempt += 1
 
 
 def split_batch(data: List[Any], batch_size: int) -> List[List[Any]]:
@@ -51,16 +237,7 @@ def snake_case_columns(df: pd.DataFrame) -> pd.DataFrame:
 async def wait_for_global_yf_rate_limit() -> None:
     """Enforces a process-wide minimum interval between yfinance requests."""
 
-    global _yf_last_request_ts
-
-    async with _yf_rate_limit_lock:
-        now = time.monotonic()
-        elapsed = now - _yf_last_request_ts
-
-        if elapsed < YF_GLOBAL_MIN_INTERVAL_SECONDS:
-            await asyncio.sleep(YF_GLOBAL_MIN_INTERVAL_SECONDS - elapsed)
-
-        _yf_last_request_ts = time.monotonic()
+    await yf_rate_limiter.acquire()
 
 
 async def cancel_pending_tasks(tasks: list[asyncio.Task]) -> None:
@@ -256,3 +433,151 @@ def dataframe_to_records(table, df: pd.DataFrame) -> list[dict]:
                 )
 
     return records
+
+
+def get_stock_list_path() -> Path:
+    configured_path = os.getenv("STOCK_LIST_PATH")
+    if configured_path:
+        path = Path(configured_path)
+        return path if path.is_absolute() else ROOT_DIR / path
+
+    return DATA_DIR / "indonesian_stock_list.json"
+
+
+DEFAULT_TRAIN_CONFIG = (
+    ROOT_DIR / "stock_market" / "analytics" / "configs" / "train.yaml"
+)
+
+DEFAULT_INFERENCE_CONFIG = (
+    ROOT_DIR / "stock_market" / "analytics" / "configs" / "inference.yaml"
+)
+
+TRAIN_CONFIG_HEADER = """\
+# Training configuration for stock_market.analytics.training.
+#
+# `feature_selection` is written by select_features() after every SHAP-RFE run.
+# The writer merges into this tree instead of replacing the file, so manually
+# added sections/keys are preserved on future updates.
+#
+# To extend the config, add new keys or top-level sections (e.g. `training`)
+# below. Bump `schema_version` only when the layout changes in a way that
+# needs a migration.
+"""
+
+INFERENCE_CONFIG_HEADER = """\
+# Inference configuration for stock_market.analytics.training.
+#
+# Written by train.py after every successful training run. It points serving
+# code at the latest exported model and records the feature order, selected
+# hyperparameters, data window, and holdout metrics used for that model.
+#
+# `model.path` is relative to the project root unless it is absolute.
+# Existing top-level keys are merged on update, so future additions made here
+# are preserved. `schema_version` allows migrations if the layout changes.
+"""
+
+
+def to_builtin(value: Any) -> Any:
+    """Convert numpy/pandas scalars and containers into YAML-safe Python types."""
+    if isinstance(value, dict):
+        return {key: to_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_builtin(item) for item in value]
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (AttributeError, ValueError):
+            pass
+    if hasattr(value, "tolist"):
+        return to_builtin(value.tolist())
+    return value
+
+
+def load_train_config(path: str | Path = DEFAULT_TRAIN_CONFIG) -> dict[str, Any]:
+    """Read a YAML config, returning an empty dict when it does not exist."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_inference_config(
+    path: str | Path = DEFAULT_INFERENCE_CONFIG,
+) -> dict[str, Any]:
+    """Read ``inference.yaml``."""
+    return load_train_config(path)
+
+
+def save_selected_features(
+    features: List[str],
+    score: float,
+    params: dict[str, Any],
+    path: str | Path = DEFAULT_TRAIN_CONFIG,
+) -> Path:
+    """
+    Persist the feature-selection result into train.yaml.
+
+    The config is merged instead of overwritten, so sections/keys that are
+    added manually in the future (e.g. model hyperparameters, experiment
+    settings) survive the next feature-selection run.
+    """
+    path = Path(path)
+    config = load_train_config(path)
+
+    # Keep the update-friendly top-level sections present even if the file is
+    # recreated from scratch.
+    feature_selection = config.setdefault("feature_selection", {})
+    config.setdefault("training", {})
+    feature_selection.update(
+        {
+            "schema_version": 1,
+            "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "params": to_builtin(params),
+            "best": {
+                "cv_f1_macro": float(score),
+                "n_features": len(features),
+            },
+            "features": [str(feature) for feature in features],
+        }
+    )
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write(TRAIN_CONFIG_HEADER)
+        f.write("\n")
+        yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
+
+    logger.success(
+        "Wrote {} selected feature(s) (CV F1 Macro = {:.6f}) to {}",
+        len(features),
+        float(score),
+        path,
+    )
+    return path
+
+
+def save_inference_config(
+    config: dict[str, Any],
+    path: str | Path = DEFAULT_INFERENCE_CONFIG,
+) -> Path:
+    """
+    Persist the latest training result into inference.yaml.
+
+    Top-level keys already present in the file are preserved unless they are
+    part of the new result, so future serving settings can live alongside the
+    generated metadata.
+    """
+    path = Path(path)
+    merged = load_train_config(path)
+    merged.update(to_builtin(config))
+
+    with path.open("w", encoding="utf-8") as f:
+        f.write(INFERENCE_CONFIG_HEADER)
+        f.write("\n")
+        yaml.safe_dump(merged, f, sort_keys=False, default_flow_style=False)
+
+    logger.success("Wrote inference config to {}", path)
+    return path

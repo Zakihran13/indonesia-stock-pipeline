@@ -1,0 +1,215 @@
+# Inference configuration for stock_market.analytics.training.
+#
+# Written by train.py after every successful training run. It points serving
+# code at the latest exported model and records the feature order, selected
+# hyperparameters, data window, and holdout metrics used for that model.
+#
+# `model.path` is relative to the project root unless it is absolute.
+# Existing top-level keys are merged on update, so future additions made here
+# are preserved. `schema_version` allows migrations if the layout changes.
+
+schema_version: 1
+generated_at: '2026-11-13T01:50:31'
+label:
+  horizon: 10
+  classes:
+    0: lower_barrier
+    1: neither_barrier
+    2: upper_barrier
+model:
+  path: stock_market/analytics/models/outperformer_xgb_latest.ubj
+  format: ubj
+  trained_at: '2026-11-13T01:50:31'
+  xgboost_version: 3.4.1
+  device: cuda
+  n_estimators: 3000
+  best_iteration: 583
+  n_features: 32
+features:
+- atr_14_normalized
+- daily_range_normalized
+- stochastic_pct_k_14
+- rank_volatility_20d_ann
+- volatility_25d_ann
+- distance_low_52w
+- volatility_5d_ann
+- realized_kurtosis_60d
+- ulcer_index_60d
+- close_position_in_range
+- rolling_max_drawdown_60d
+- volatility_10d_ann
+- rank_momentum_120d
+- rank_momentum_12_1
+- momentum_5d
+- momentum_30d
+- rsi_14
+- distance_high_52w
+- moving_avg_slope_10d
+- rank_distance_high_52w
+- momentum_60d
+- volatility_30d_ann
+- sector_rel_momentum_120d
+- bollinger_pct_b_20
+- momentum_10d
+- momentum_20d
+- volatility_15d_ann
+- sector_rel_momentum_20d
+- rank_momentum_60d
+- upper_shadow_ratio
+- efficiency_ratio_20d
+- gap
+feature_engineering:
+  enabled: true
+  source: shap_rfe
+  n_features: 32
+  cv_f1_macro: 0.48567059471062074
+  params:
+    stock_ids: []
+    start_date: '2017-01-01'
+    end_date: '2020-01-01'
+    n_estimators: 800
+    min_features: 10
+    step: 0.1
+    cv: 3
+    device: cuda
+    horizon: 10
+    sample_fraction: 0.25
+    sample_random_state: 42
+    prepared_rows: 22145
+    sampled_rows: 5536
+data:
+  start_date: '2017-01-01'
+  end_date: '2020-01-01'
+  stock_ids: []
+  rows: 22145
+  label_distribution:
+    0: 0.37353804470535107
+    1: 0.25373673515466244
+    2: 0.37272522013998644
+split:
+  train_fraction: 0.7
+  validation_fraction: 0.15
+  embargo_days: 20
+  train_rows: 17873
+  validation_rows: 1509
+  test_rows: 1918
+  train_start: '2017-01-16T00:00:00'
+  train_end: '2019-06-17T00:00:00'
+  validation_start: '2019-07-08T00:00:00'
+  validation_end: '2019-09-03T00:00:00'
+  test_start: '2019-09-24T00:00:00'
+  test_end: '2019-12-12T00:00:00'
+search:
+  enabled: true
+  scoring: f1_macro
+  cv: 3
+  n_iter: 50
+  best_score: 0.5031472008738083
+  best_params:
+    subsample: 1.0
+    reg_lambda: 5
+    reg_alpha: 0
+    min_child_weight: 1
+    max_depth: 6
+    learning_rate: 0.01
+    gamma: 0
+    colsample_bytree: 0.6
+metrics:
+  validation:
+    rows: 1509
+    accuracy: 0.47183565275016565
+    balanced_accuracy: 0.48321780322336805
+    precision_weighted: 0.4754745297472627
+    recall_weighted: 0.47183565275016565
+    f1_weighted: 0.4690616571993455
+    f1_macro: 0.4754990716429644
+    classification_report:
+      lower_barrier:
+        precision: 0.49673202614379086
+        recall: 0.3806343906510851
+        f1-score: 0.43100189035916825
+        support: 599.0
+      neither_barrier:
+        precision: 0.4891566265060241
+        recall: 0.5486486486486486
+        f1-score: 0.5171974522292994
+        support: 370.0
+      upper_barrier:
+        precision: 0.44251968503937006
+        recall: 0.5203703703703704
+        f1-score: 0.47829787234042553
+        support: 540.0
+      accuracy: 0.47183565275016565
+      macro avg:
+        precision: 0.47613611256306165
+        recall: 0.48321780322336805
+        f1-score: 0.4754990716429644
+        support: 1509.0
+      weighted avg:
+        precision: 0.4754745297472627
+        recall: 0.47183565275016565
+        f1-score: 0.4690616571993455
+        support: 1509.0
+    confusion_matrix:
+    - - 228
+      - 123
+      - 248
+    - - 61
+      - 203
+      - 106
+    - - 170
+      - 89
+      - 281
+    label_distribution:
+      0: 0.39695162359178265
+      1: 0.24519549370444002
+      2: 0.35785288270377735
+  test:
+    rows: 1918
+    accuracy: 0.47340980187695514
+    balanced_accuracy: 0.4939350195398533
+    precision_weighted: 0.5041940548234436
+    recall_weighted: 0.47340980187695514
+    f1_weighted: 0.47219154467482005
+    f1_macro: 0.4787756698105357
+    classification_report:
+      lower_barrier:
+        precision: 0.5951035781544256
+        recall: 0.37089201877934275
+        f1-score: 0.4569775849602314
+        support: 852.0
+      neither_barrier:
+        precision: 0.48697394789579157
+        recall: 0.5560640732265446
+        f1-score: 0.5192307692307693
+        support: 437.0
+      upper_barrier:
+        precision: 0.393018018018018
+        recall: 0.5548489666136724
+        f1-score: 0.46011865524060647
+        support: 629.0
+      accuracy: 0.47340980187695514
+      macro avg:
+        precision: 0.4916985146894117
+        recall: 0.4939350195398533
+        f1-score: 0.4787756698105357
+        support: 1918.0
+      weighted avg:
+        precision: 0.5041940548234436
+        recall: 0.47340980187695514
+        f1-score: 0.47219154467482005
+        support: 1918.0
+    confusion_matrix:
+    - - 316
+      - 139
+      - 397
+    - - 52
+      - 243
+      - 142
+    - - 163
+      - 117
+      - 349
+    label_distribution:
+      0: 0.44421272158498437
+      1: 0.2278415015641293
+      2: 0.32794577685088633
